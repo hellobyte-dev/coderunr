@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # CodeRunr API Service
+  coderunr-api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "2000:2000"
+    environment:
+      - CODERUNR_BIND_ADDRESS=0.0.0.0:2000
+      - CODERUNR_LOG_LEVEL=debug
+      - CODERUNR_DATA_DIRECTORY=/coderunr
+      - CODERUNR_REPO_URL=http://coderunr-repo:8000/index
+    volumes:
+      - coderunr-data:/coderunr
+      - /var/run/docker.sock:/var/run/docker.sock
+    user: "0:0"  # Run as root to avoid permission issues
+    privileged: true  # Required for isolate
+    depends_on:
+      - coderunr-repo
+    networks:
+      - coderunr-network
+
+  # Local Package Repository Service  
+  coderunr-repo:
+    build:
+      context: ./repo
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./packages:/piston/packages
+      - ./repo:/piston/repo
+    networks:
+      - coderunr-network
+    command: ["--no-build"]  # Don't build packages, use pre-built ones
+
+volumes:
+  coderunr-data:
+  repo-data:
+
+networks:
+  coderunr-network:
+    driver: bridge
