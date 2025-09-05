@@ -18,20 +18,23 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/coderunr/api/internal/config"
+	"github.com/coderunr/api/internal/runtime"
 	"github.com/coderunr/api/internal/types"
 )
 
 // PackageService handles package management operations
 type PackageService struct {
-	cfg    *config.Config
-	logger *logrus.Logger
+	cfg            *config.Config
+	logger         *logrus.Logger
+	runtimeManager *runtime.Manager
 }
 
 // NewPackageService creates a new package service
-func NewPackageService(cfg *config.Config, logger *logrus.Logger) *PackageService {
+func NewPackageService(cfg *config.Config, logger *logrus.Logger, runtimeManager *runtime.Manager) *PackageService {
 	return &PackageService{
-		cfg:    cfg,
-		logger: logger,
+		cfg:            cfg,
+		logger:         logger,
+		runtimeManager: runtimeManager,
 	}
 }
 
@@ -124,7 +127,7 @@ func (ps *PackageService) GetPackage(language, versionConstraint string) (*types
 
 // IsInstalled checks if a package is installed
 func (ps *PackageService) IsInstalled(pkg *types.Package) bool {
-	installedFile := filepath.Join(ps.getInstallPath(pkg), ".installed")
+	installedFile := filepath.Join(ps.getInstallPath(pkg), ".ppman-installed")
 	_, err := os.Stat(installedFile)
 	return err == nil
 }
@@ -174,10 +177,17 @@ func (ps *PackageService) InstallPackage(pkg *types.Package) error {
 	}
 
 	// Mark as installed
-	installedFile := filepath.Join(installPath, ".installed")
+	installedFile := filepath.Join(installPath, ".ppman-installed")
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	if err := os.WriteFile(installedFile, []byte(timestamp), 0644); err != nil {
 		return fmt.Errorf("failed to mark package as installed: %w", err)
+	}
+
+	// Load the package into runtime manager immediately
+	ps.logger.Debug("Loading package into runtime manager")
+	if err := ps.runtimeManager.LoadPackage(installPath); err != nil {
+		ps.logger.WithError(err).Warnf("Failed to load package into runtime manager: %s", installPath)
+		// Don't fail installation if runtime loading fails
 	}
 
 	ps.logger.Infof("Successfully installed %s-%s", pkg.Language, pkg.Version.String())

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/coderunr/api/internal/config"
@@ -71,6 +72,12 @@ type Job struct {
 	dirtyBoxes   []*types.IsolateBox
 	logger       *logrus.Entry
 	manager      *Manager
+
+	// Streaming support
+	EventChannel chan types.StreamEvent
+	StdinChannel chan string
+	runningCmd   *exec.Cmd
+	cmdMutex     sync.RWMutex
 }
 
 // NewJob creates a new job from a request
@@ -157,6 +164,10 @@ func (m *Manager) NewJob(runtime *types.Runtime, request *types.JobRequest) *Job
 		dirtyBoxes:   []*types.IsolateBox{},
 		logger:       logrus.WithField("job_id", jobID),
 		manager:      m,
+
+		// Initialize streaming channels
+		EventChannel: make(chan types.StreamEvent, 100),
+		StdinChannel: make(chan string, 10),
 	}
 }
 
@@ -226,6 +237,130 @@ func (j *Job) Execute(ctx context.Context) (*types.ExecutionResult, error) {
 
 	j.State = types.JobStateExecuted
 	return result, nil
+}
+
+// ExecuteStream executes the job with streaming support
+func (j *Job) ExecuteStream(ctx context.Context) error {
+	defer j.cleanup()
+	defer close(j.EventChannel)
+
+	// Wait for available slot
+	if err := j.waitForSlot(); err != nil {
+		j.sendEvent(types.StreamEvent{Type: "error", Error: fmt.Errorf("failed to acquire job slot: %w", err)})
+		return fmt.Errorf("failed to acquire job slot: %w", err)
+	}
+	defer j.releaseSlot()
+
+	j.logger.Info("Executing job with streaming")
+
+	// Prime the job (create isolate box and prepare files)
+	box, err := j.prime(ctx)
+	if err != nil {
+		j.sendEvent(types.StreamEvent{Type: "error", Error: fmt.Errorf("failed to prime job: %w", err)})
+		return fmt.Errorf("failed to prime job: %w", err)
+	}
+
+	// Send runtime information
+	j.sendEvent(types.StreamEvent{Type: "runtime"})
+
+	// Compile stage (if needed)
+	if j.Runtime.Compiled {
+		j.logger.Debug("Running compile stage")
+		j.sendEvent(types.StreamEvent{Type: "stage", Stage: "compile"})
+
+		compileResult, err := j.safeCallStream(ctx, box, "compile", j.getCodeFileNames(),
+			j.Timeouts.Compile, j.CPUTimes.Compile, j.MemoryLimits.Compile)
+		if err != nil {
+			j.sendEvent(types.StreamEvent{Type: "error", Error: fmt.Errorf("compile stage failed: %w", err)})
+			return fmt.Errorf("compile stage failed: %w", err)
+		}
+
+		// Send exit information for compile stage
+		j.sendEvent(types.StreamEvent{Type: "exit", Stage: "compile", Code: compileResult.Code})
+
+		// If compilation failed, don't run
+		if compileResult.Code != 0 {
+			return nil
+		}
+
+		// Create new box for run stage
+		if newBox, err := j.createIsolateBox(); err != nil {
+			j.sendEvent(types.StreamEvent{Type: "error", Error: fmt.Errorf("failed to create run box: %w", err)})
+			return fmt.Errorf("failed to create run box: %w", err)
+		} else {
+			// Move compiled files to new box
+			oldSubmissionDir := filepath.Join(box.Dir, "submission")
+			newSubmissionDir := filepath.Join(newBox.Dir, "submission")
+			if err := os.Rename(oldSubmissionDir, newSubmissionDir); err != nil {
+				j.sendEvent(types.StreamEvent{Type: "error", Error: fmt.Errorf("failed to move compiled files: %w", err)})
+				return fmt.Errorf("failed to move compiled files: %w", err)
+			}
+			box = newBox
+		}
+	}
+
+	// Run stage
+	j.logger.Debug("Running execution stage")
+	j.sendEvent(types.StreamEvent{Type: "stage", Stage: "run"})
+
+	args := []string{j.Files[0].Name}
+	args = append(args, j.Args...)
+
+	runResult, err := j.safeCallStream(ctx, box, "run", args,
+		j.Timeouts.Run, j.CPUTimes.Run, j.MemoryLimits.Run)
+	if err != nil {
+		j.sendEvent(types.StreamEvent{Type: "error", Error: fmt.Errorf("run stage failed: %w", err)})
+		return fmt.Errorf("run stage failed: %w", err)
+	}
+
+	// Send exit information for run stage
+	j.sendEvent(types.StreamEvent{Type: "exit", Stage: "run", Code: runResult.Code})
+
+	j.State = types.JobStateExecuted
+	return nil
+}
+
+// sendEvent sends a stream event
+func (j *Job) sendEvent(event types.StreamEvent) {
+	select {
+	case j.EventChannel <- event:
+	default:
+		j.logger.Warn("Event channel full, dropping event")
+	}
+}
+
+// WriteStdin writes data to the running process stdin
+func (j *Job) WriteStdin(data string) error {
+	select {
+	case j.StdinChannel <- data:
+		return nil
+	default:
+		return fmt.Errorf("stdin channel full")
+	}
+}
+
+// SendSignal sends a signal to the running process
+func (j *Job) SendSignal(signal string) error {
+	j.cmdMutex.RLock()
+	defer j.cmdMutex.RUnlock()
+
+	if j.runningCmd == nil || j.runningCmd.Process == nil {
+		return fmt.Errorf("no running process")
+	}
+
+	var sig os.Signal
+	switch signal {
+	case "SIGTERM":
+		sig = syscall.SIGTERM
+	case "SIGKILL":
+		sig = syscall.SIGKILL
+	case "SIGINT":
+		sig = syscall.SIGINT
+	default:
+		return fmt.Errorf("invalid signal: %s", signal)
+	}
+
+	return j.runningCmd.Process.Signal(sig)
 }
 
 // prime prepares the job for execution
@@ -443,7 +578,179 @@ func (j *Job) safeCall(ctx context.Context, box *types.IsolateBox, stage string,
 		result.Signal = "SIGKILL"
 	}
 
+	// Handle command execution error
+	if err != nil {
+		if result.Status == "" {
+			result.Status = "RE"
+			result.Message = "Runtime error"
+		}
+	}
+
 	return result, nil
+}
+
+// safeCallStream executes a stage with streaming support
+func (j *Job) safeCallStream(ctx context.Context, box *types.IsolateBox, stage string, args []string,
+	timeout, cpuTime time.Duration, memoryLimit int64) (*types.StageResult, error) {
+
+	// Build isolate command (same as safeCall)
+	isolateArgs := []string{
+		"--run",
+		fmt.Sprintf("-b%d", box.ID),
+		fmt.Sprintf("--meta=%s", box.MetadataPath),
+		"--cg",
+		"-s",
+		"-c", "/box/submission",
+		"-E", "HOME=/tmp",
+	}
+
+	// Add environment variables
+	for _, envVar := range j.Runtime.EnvVars {
+		isolateArgs = append(isolateArgs, "-E", envVar)
+	}
+
+	// Add coderunr language env var
+	isolateArgs = append(isolateArgs, "-E", fmt.Sprintf("CODERUNR_LANGUAGE=%s", j.Runtime.Language))
+
+	// Add directories
+	isolateArgs = append(isolateArgs, fmt.Sprintf("--dir=%s", j.Runtime.PkgDir))
+	isolateArgs = append(isolateArgs, "--dir=/etc:noexec")
+
+	// Add resource limits
+	isolateArgs = append(isolateArgs, fmt.Sprintf("--processes=%d", j.Runtime.MaxProcessCount))
+	isolateArgs = append(isolateArgs, fmt.Sprintf("--open-files=%d", j.Runtime.MaxOpenFiles))
+	isolateArgs = append(isolateArgs, fmt.Sprintf("--fsize=%d", j.Runtime.MaxFileSize/1000))
+	isolateArgs = append(isolateArgs, fmt.Sprintf("--wall-time=%d", int(timeout.Seconds())))
+	isolateArgs = append(isolateArgs, fmt.Sprintf("--time=%d", int(cpuTime.Seconds())))
+	isolateArgs = append(isolateArgs, "--extra-time=0")
+
+	// Add memory limit if specified
+	if memoryLimit >= 0 {
+		isolateArgs = append(isolateArgs, fmt.Sprintf("--cg-mem=%d", memoryLimit/1000))
+	}
+
+	// Add networking option
+	if !j.manager.config.DisableNetworking {
+		isolateArgs = append(isolateArgs, "--share-net")
+	}
+
+	// Add execution command
+	isolateArgs = append(isolateArgs, "--", "/bin/bash", filepath.Join(j.Runtime.PkgDir, stage))
+	isolateArgs = append(isolateArgs, args...)
+
+	// Create command with context
+	cmd := exec.CommandContext(ctx, IsolatePath, isolateArgs...)
+
+	// Set up pipes
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdin pipe: %w", err)
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
+	// Store running command for signal handling
+	j.cmdMutex.Lock()
+	j.runningCmd = cmd
+	j.cmdMutex.Unlock()
+
+	// Start command
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start isolate: %w", err)
+	}
+
+	// Handle stdin in goroutine (with streaming support)
+	go func() {
+		defer stdin.Close()
+
+		// Write initial stdin if provided
+		if j.Stdin != "" {
+			stdin.Write([]byte(j.Stdin))
+		}
+
+		// Listen for streaming stdin
+		for {
+			select {
+			case data, ok := <-j.StdinChannel:
+				if !ok {
+					return
+				}
+				stdin.Write([]byte(data))
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Handle stdout streaming
+	go j.streamOutput(stdout, "stdout")
+
+	// Handle stderr streaming
+	go j.streamOutput(stderr, "stderr")
+
+	// Wait for command to finish
+	err = cmd.Wait()
+
+	// Clear running command
+	j.cmdMutex.Lock()
+	j.runningCmd = nil
+	j.cmdMutex.Unlock()
+
+	// Parse metadata
+	metadata, parseErr := j.parseMetadata(box.MetadataPath)
+	if parseErr != nil {
+		j.logger.WithError(parseErr).Warn("Failed to parse metadata")
+	}
+
+	result := &types.StageResult{
+		Code: cmd.ProcessState.ExitCode(),
+	}
+
+	// Apply metadata if available
+	if metadata != nil {
+		result.Memory = metadata.Memory
+		result.CPUTime = metadata.CPUTime
+		result.WallTime = metadata.WallTime
+		result.Status = metadata.Status
+		result.Message = metadata.Message
+		result.Signal = metadata.Signal
+	}
+
+	// Override signal for certain statuses
+	if result.Status == "TO" || result.Status == "OL" || result.Status == "EL" {
+		result.Signal = "SIGKILL"
+	}
+
+	// Handle command execution error
+	if err != nil {
+		if result.Status == "" {
+			result.Status = "RE"
+			result.Message = "Runtime error"
+		}
+	}
+
+	return result, nil
+}
+
+// streamOutput reads output and sends it as events
+func (j *Job) streamOutput(reader io.Reader, streamType string) {
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		line := scanner.Text()
+		j.sendEvent(types.StreamEvent{
+			Type:   "data",
+			Stream: streamType,
+			Data:   line,
+		})
+	}
 }
 
 // readWithLimit reads from a reader with size limit

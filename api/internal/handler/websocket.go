@@ -168,8 +168,13 @@ func (wsConn *WebSocketConnection) handleData(msg types.WebSocketMessage) error 
 		return nil
 	}
 
-	// TODO: Implement stdin writing to running process
-	// This would require modifying the job execution to support real-time stdin
+	// Write to job's stdin channel
+	if err := wsConn.job.WriteStdin(msg.Data); err != nil {
+		wsConn.logger.WithError(err).Error("Failed to write to stdin")
+		wsConn.sendError("Failed to write to stdin: " + err.Error())
+		return err
+	}
+
 	return nil
 }
 
@@ -195,7 +200,13 @@ func (wsConn *WebSocketConnection) handleSignal(msg types.WebSocketMessage) erro
 		return nil
 	}
 
-	// TODO: Implement signal sending to running process
+	// Send signal to running process
+	if err := wsConn.job.SendSignal(msg.Signal); err != nil {
+		wsConn.logger.WithError(err).Error("Failed to send signal")
+		wsConn.sendError("Failed to send signal: " + err.Error())
+		return err
+	}
+
 	return nil
 }
 
@@ -205,28 +216,51 @@ func (wsConn *WebSocketConnection) executeJob(ctx context.Context) {
 		wsConn.close(4999, "Job Completed")
 	}()
 
-	// Execute the job
-	result, err := wsConn.job.Execute(ctx)
-	if err != nil {
+	// Start listening to job events
+	go func() {
+		for event := range wsConn.job.EventChannel {
+			wsConn.handleJobEvent(event)
+		}
+	}()
+
+	// Execute the job with streaming
+	if err := wsConn.job.ExecuteStream(ctx); err != nil {
 		wsConn.sendError("Execution failed: " + err.Error())
 		return
 	}
+}
 
-	// Send compilation stage if it exists
-	if result.Compile != nil {
-		wsConn.sendStageResult("compile", result.Compile)
+// handleJobEvent handles events from job execution
+func (wsConn *WebSocketConnection) handleJobEvent(event types.StreamEvent) {
+	switch event.Type {
+	case "runtime":
+		wsConn.sendMessage(types.WebSocketMessage{
+			Type:     "runtime",
+			Language: wsConn.job.Runtime.Language,
+			Version:  wsConn.job.Runtime.Version.String(),
+		})
+	case "stage":
+		wsConn.sendMessage(types.WebSocketMessage{
+			Type:  "stage",
+			Stage: event.Stage,
+		})
+	case "data":
+		wsConn.sendMessage(types.WebSocketMessage{
+			Type:   "data",
+			Stream: event.Stream,
+			Data:   event.Data,
+		})
+	case "exit":
+		wsConn.sendMessage(types.WebSocketMessage{
+			Type:  "exit",
+			Stage: event.Stage,
+			Code:  &event.Code,
+		})
+	case "error":
+		if event.Error != nil {
+			wsConn.sendError(event.Error.Error())
+		}
 	}
-
-	// Send run stage
-	if result.Run != nil {
-		wsConn.sendStageResult("run", result.Run)
-	}
-
-	// Send completion
-	wsConn.sendMessage(types.WebSocketMessage{
-		Type:    "complete",
-		Payload: result,
-	})
 }
 
 // sendStageResult sends stage execution result

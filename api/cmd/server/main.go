@@ -51,7 +51,7 @@ func main() {
 	jobManager := job.NewManager(cfg)
 
 	// Initialize package service
-	packageService := service.NewPackageService(cfg, logger)
+	packageService := service.NewPackageService(cfg, logger, runtimeManager)
 
 	// Initialize handlers
 	h := handler.NewHandler(jobManager, runtimeManager, logger)

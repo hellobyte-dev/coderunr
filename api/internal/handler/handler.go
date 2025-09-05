@@ -76,9 +76,9 @@ func (h *Handler) ExecuteCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle backward compatibility
-	if result.Compile == nil && result.Run != nil {
-		result.Compile = result.Run
+	// Handle backward compatibility (Piston behavior)
+	if result.Run == nil && result.Compile != nil {
+		result.Run = result.Compile
 	}
 
 	w.Header().Set("Content-Type", "application/json")

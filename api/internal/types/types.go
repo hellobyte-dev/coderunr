@@ -127,13 +127,27 @@ type RuntimeInfo struct {
 
 // WebSocketMessage represents a WebSocket message
 type WebSocketMessage struct {
-	Type    string      `json:"type"`
-	Stream  string      `json:"stream,omitempty"`
-	Data    string      `json:"data,omitempty"`
-	Stage   string      `json:"stage,omitempty"`
-	Signal  string      `json:"signal,omitempty"`
-	Error   string      `json:"error,omitempty"`
-	Payload interface{} `json:"payload,omitempty"`
+	Type     string      `json:"type"`
+	Stream   string      `json:"stream,omitempty"`
+	Data     string      `json:"data,omitempty"`
+	Stage    string      `json:"stage,omitempty"`
+	Signal   string      `json:"signal,omitempty"`
+	Error    string      `json:"error,omitempty"`
+	Code     *int        `json:"code,omitempty"`
+	Language string      `json:"language,omitempty"`
+	Version  string      `json:"version,omitempty"`
+	Payload  interface{} `json:"payload,omitempty"`
+}
+
+// StreamEvent represents a streaming execution event
+type StreamEvent struct {
+	Type   string
+	Stream string
+	Data   string
+	Stage  string
+	Signal string
+	Code   int
+	Error  error
 }
 
 // ErrorResponse represents an API error response

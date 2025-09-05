@@ -79,6 +79,11 @@ func (m *Manager) LoadPackages() error {
 	return nil
 }
 
+// LoadPackage loads a single package from the given directory (exported version)
+func (m *Manager) LoadPackage(packageDir string) error {
+	return m.loadPackage(packageDir)
+}
+
 // loadPackage loads a single package from the given directory
 func (m *Manager) loadPackage(packageDir string) error {
 	// Check if package is installed
