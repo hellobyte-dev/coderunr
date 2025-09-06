@@ -3,6 +3,9 @@
 <p align="center">
   <strong>A high-performance, secure code execution engine built with Go</strong>
 </p>
+<p align="center">
+  <em>Migrated from Piston with full API compatibility and enhanced performance</em>
+</p>
 
 <p align="center">
   <a href="https://github.com/hellobyte-dev/coderunr/actions">
@@ -36,6 +39,7 @@
 - **🛡️ Resource Control**: Configurable CPU, memory, and execution time limits
 - **🔌 Easy Integration**: RESTful API with comprehensive documentation
 - **🎯 Production Ready**: Docker support with automated CI/CD workflows
+- **🔄 Piston Compatible**: Drop-in replacement for Piston with full API compatibility
 
 ## 🚀 Quick Start
 
@@ -241,16 +245,28 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## 🆚 CodeRunr vs Piston
+## 🔄 Migration from Piston
 
-| Feature | Piston | CodeRunr | Notes |
-|---------|--------|----------|--------|
-| **Language** | Node.js | Go | Better performance & memory usage |
-| **API Compatibility** | ✅ | ✅ | Drop-in replacement |
-| **WebSocket** | ✅ | ✅ | Real-time execution support |
-| **Management Script** | ✅ | ✅ | Enhanced with health checks |
-| **CI/CD Workflows** | Basic | ✅ | Automated testing & deployment |
-| **Performance** | Good | ⚡ Excellent | ~3x faster execution |
+CodeRunr is a modern Go-based reimplementation of the popular Piston code execution engine. It maintains **100% API compatibility** with Piston while providing significant performance improvements and enhanced features.
+
+### Why Migrate to CodeRunr?
+
+- **🚀 3x Better Performance**: Go's compiled nature provides faster execution and lower memory usage
+- **🔧 Enhanced Management**: Unified management script with health monitoring and automation
+- **⚡ Modern Architecture**: Clean, maintainable Go codebase with comprehensive testing
+- **🔌 Drop-in Replacement**: Same API endpoints, request/response formats, and configuration
+- **📦 Easy Migration**: Simply replace your Piston deployment with CodeRunr
+
+### Compatibility
+
+CodeRunr maintains compatibility with:
+- All Piston API v2 endpoints (`/api/v2/execute`, `/api/v2/runtimes`, etc.)
+- WebSocket protocol for real-time execution (`/api/v2/connect`)
+- Environment variable configuration (with `CODERUNR_` prefix)
+- Language package format and structure
+- Request/response JSON schemas
+
+See our [Migration Guide](MIGRATION_SUMMARY.md) for detailed migration instructions.
 
 ## 📄 License
 
