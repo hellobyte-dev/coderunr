@@ -38,7 +38,28 @@ jobs:
                           PACKAGES=$(echo "${{ github.event.inputs.packages }}" | tr ',' '\n' | jq -R -s -c 'split("\n")[:-1]')
                       fi
                   else
-                      PACKAGES=$(git diff --name-only HEAD~1 HEAD | grep "^packages/" | awk -F/ '{print $2"-"$3}' | sort -u | jq -R -s -c 'split("\n")[:-1]')
+                      # Get changed files in packages/ directory
+                      CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep "^packages/")
+                      
+                      # Extract package directories that have build.sh
+                      PACKAGES="[]"
+                      if [[ -n "$CHANGED_FILES" ]]; then
+                          # Get unique package directories from changed files
+                          CHANGED_DIRS=$(echo "$CHANGED_FILES" | awk -F/ '{if(NF>=3) print $2"/"$3}' | sort -u)
+                          
+                          # Filter only directories that have build.sh (actual packages)
+                          VALID_PACKAGES=""
+                          for dir in $CHANGED_DIRS; do
+                              if [[ -f "packages/$dir/build.sh" ]]; then
+                                  PACKAGE_NAME=$(echo "$dir" | tr '/' '-')
+                                  VALID_PACKAGES="$VALID_PACKAGES$PACKAGE_NAME\n"
+                              fi
+                          done
+                          
+                          if [[ -n "$VALID_PACKAGES" ]]; then
+                              PACKAGES=$(echo -e "$VALID_PACKAGES" | sed '/^$/d' | jq -R -s -c 'split("\n")[:-1]')
+                          fi
+                      fi
                   fi
                   
                   echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
