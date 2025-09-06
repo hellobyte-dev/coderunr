@@ -7,22 +7,20 @@ set -e
 
 echo "🚀 Starting CodeRunr Local Development Environment"
 
-# Build packages
-echo "📦 Building packages..."
+# Check if packages are already built
+echo "📦 Checking packages..."
 cd packages
 
-# Build available packages
-if command -v jq >/dev/null 2>&1; then
-    echo "Building Python 3.12.0..."
-    make python-3.12.0.pkg.tar.gz || echo "⚠️  Python build failed, continuing..."
-    
-    echo "Building Go 1.16.2..."
-    make go-1.16.2.pkg.tar.gz || echo "⚠️  Go build failed, continuing..."
-    
-    echo "Building Java 15.0.2..."
-    make java-15.0.2.pkg.tar.gz || echo "⚠️  Java build failed, continuing..."
+PACKAGES_EXIST=true
+if [[ ! -f "python-3.12.0.pkg.tar.gz" ]] || [[ ! -f "go-1.16.2.pkg.tar.gz" ]] || [[ ! -f "java-15.0.2.pkg.tar.gz" ]]; then
+    PACKAGES_EXIST=false
+fi
+
+if [[ "$PACKAGES_EXIST" == "false" ]]; then
+    echo "🔨 Building packages (this may take a few minutes)..."
+    make build-all || echo "⚠️  Some package builds failed, continuing..."
 else
-    echo "⚠️  jq not found, skipping package builds"
+    echo "✅ Packages already exist, skipping build"
 fi
 
 cd ..
@@ -35,7 +33,7 @@ cd ..
 
 # Start services with Docker Compose
 echo "🐳 Starting services..."
-docker-compose up -d
+docker compose up -d
 
 echo "✅ CodeRunr services started!"
 echo ""
@@ -46,4 +44,4 @@ echo ""
 echo "📝 Test the API:"
 echo "  curl http://localhost:2000/api/v2/packages"
 echo ""
-echo "🛑 Stop services with: docker-compose down"
+echo "🛑 Stop services with: docker compose down"
