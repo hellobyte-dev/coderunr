@@ -31,8 +31,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./packages:/piston/packages
-      - ./repo:/piston/repo
+      - ./packages:/coderunr/packages
+      - ./repo:/coderunr/repo
     networks:
       - coderunr-network
     command: ["--no-build"]  # Don't build packages, use pre-built ones

@@ -1,4 +1,4 @@
-cd /piston/packages
+cd /coderunr/packages
 
 SERVER=1
 BUILD=1
@@ -45,7 +45,7 @@ do
     fi
 done
 
-cd /piston/repo
+cd /coderunr/repo
 echo "Creating index"
 ./mkindex.sh
 echo "Index created"
