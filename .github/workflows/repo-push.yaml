@@ -235,11 +235,49 @@ jobs:
                   username: ${{ github.actor }}
                   password: ${{ secrets.GITHUB_TOKEN }}
 
+            - name: Prepare build context with index
+              run: |
+                  echo "Copying package index to build context..."
+                  ls -la repo/index/
+                  
+                  # Create a temporary Dockerfile that includes the index files
+                  cat > repo/Dockerfile.with-index << 'EOF'
+                  FROM debian:bookworm-slim
+                  ENV DEBIAN_FRONTEND=noninteractive
+                  
+                  # Install only essential packages for a web server
+                  RUN apt-get update && apt-get install -y \
+                      python3 \
+                      python3-pip \
+                      curl \
+                      jq \
+                      unzip \
+                      && rm -rf /var/lib/apt/lists/*
+                  
+                  # Create directories
+                  RUN mkdir -p /coderunr/packages /coderunr/repo
+                  
+                  # Copy scripts
+                  COPY entrypoint.sh mkindex.sh serve.py /
+                  
+                  # Copy package index files
+                  COPY index/ /coderunr/repo/
+                  
+                  # Make scripts executable
+                  RUN chmod +x /entrypoint.sh /mkindex.sh
+                  
+                  WORKDIR /coderunr/repo
+                  
+                  EXPOSE 8000
+                  
+                  ENTRYPOINT ["python3", "/serve.py"]
+                  EOF
+
             - name: Build and push final repo image
               uses: docker/build-push-action@v5
               with:
                   context: ./repo
-                  file: ./repo/Dockerfile
+                  file: ./repo/Dockerfile.with-index
                   platforms: linux/amd64,linux/arm64
                   push: true
                   tags: |
@@ -282,7 +320,7 @@ jobs:
                   fi
                   
                   # Test package index
-                  if curl -f http://localhost:8000/index/packages.json; then
+                  if curl -f http://localhost:8000/packages.json; then
                       echo "✅ Package JSON index accessible"
                   else
                       echo "❌ Package JSON index failed"
@@ -290,7 +328,7 @@ jobs:
                   fi
                   
                   # Test HTML index
-                  if curl -f http://localhost:8000/index/index.html | grep -q "CodeRunr"; then
+                  if curl -f http://localhost:8000/index.html | grep -q "CodeRunr"; then
                       echo "✅ HTML index accessible and valid"
                   else
                       echo "❌ HTML index failed"
@@ -299,7 +337,7 @@ jobs:
                   
                   # Performance test
                   echo "Running basic performance test..."
-                  if time curl -s http://localhost:8000/index/packages.json > /dev/null; then
+                  if time curl -s http://localhost:8000/packages.json > /dev/null; then
                       echo "✅ Repository performance acceptable"
                   else
                       echo "⚠️  Repository performance may be slow"
