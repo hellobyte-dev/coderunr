@@ -46,8 +46,11 @@
 ### Using Docker (Recommended)
 
 ```bash
-# Run with Docker
-docker run -p 2000:2000 ghcr.io/hellobyte-dev/coderunr/api:latest
+# Run with Docker (requires privileged mode for isolate sandbox)
+docker run --privileged -p 2000:2000 ghcr.io/hellobyte-dev/coderunr/api:latest
+
+# Or use Docker Compose for development
+docker-compose up -d
 
 # Test the API
 curl -X POST http://localhost:2000/api/v2/execute \
@@ -58,6 +61,8 @@ curl -X POST http://localhost:2000/api/v2/execute \
     "files": [{"content": "print(\"Hello, CodeRunr!\")"}]
   }'
 ```
+
+> **⚠️ Important**: CodeRunr requires `--privileged` mode when running in Docker because it uses Linux isolate for secure code execution sandboxing. This is necessary for proper process isolation and security.
 
 ### Using the Management Script
 
@@ -161,12 +166,17 @@ GET /api/v2/runtimes
   {
     "language": "python",
     "version": "3.12.0",
-    "aliases": ["py", "python3"]
+    "aliases": ["py", "py3", "python3", "python3.12"]
   },
   {
     "language": "go",
-    "version": "1.21.0",
-    "aliases": ["golang"]
+    "version": "1.16.2",
+    "aliases": ["go", "golang"]
+  },
+  {
+    "language": "java",
+    "version": "15.0.2",
+    "aliases": []
   }
 ]
 ```
@@ -175,10 +185,9 @@ GET /api/v2/runtimes
 
 | Language | Version | Aliases |
 |----------|---------|---------|
-| Python | 3.12.0 | `py`, `python3` |
-| Go | 1.21.0 | `golang` |
-| Java | 17.0.0 | `openjdk` |
-| JavaScript | 18.0.0 | `js`, `node` |
+| Python | 3.12.0 | `py`, `py3`, `python3`, `python3.12` |
+| Go | 1.16.2 | `go`, `golang` |
+| Java | 15.0.2 | - |
 
 *More languages can be added by installing packages in the `packages/` directory.*
 
