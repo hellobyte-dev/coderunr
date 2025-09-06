@@ -111,37 +111,34 @@ jobs:
               run: |
                   echo "Creating package index..."
                   
-                  # Download existing index if it exists
-                  if curl -f -L -o existing_index https://github.com/${{ github.repository }}/releases/download/packages/index 2>/dev/null; then
-                      echo "Downloaded existing index"
-                      cp existing_index index
-                  else
-                      echo "No existing index found, creating new one"
-                      echo "" > index
-                  fi
+                  # Download all existing packages from the release
+                  echo "Downloading existing packages..."
+                  curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/packages | \
+                      jq '.assets[] | select(.name | endswith(".pkg.tar.gz")) | .browser_download_url' -r | \
+                      xargs -I {} sh -c 'curl -sLO "{}" || true'
                   
+                  # Create fresh index from all available packages
+                  echo "" > index
                   BASEURL=https://github.com/${{ github.repository }}/releases/download/packages/
                   
-                  # Process new packages
+                  # Process all packages (existing + new)
                   for pkg in *.pkg.tar.gz; do
                       if [[ -f "$pkg" ]]; then
-                          PKGNAME=$(echo $pkg | sed 's/\.pkg\.tar\.gz//g' | sed 's/-[^-]*$//')
-                          PKGVERSION=$(echo $pkg | sed 's/\.pkg\.tar\.gz//g' | sed 's/.*-//')
-                          PKGCHECKSUM=$(sha256sum $pkg | awk '{print $1}')
+                          PKGFILE=$(basename "$pkg")
+                          PKGFILENAME=$(echo "$PKGFILE" | sed 's/\.pkg\.tar\.gz//g')
                           
-                          # Remove existing entry for this package if it exists
-                          if [[ -f index ]]; then
-                              grep -v "^$PKGNAME," index > index.tmp && mv index.tmp index || true
-                          fi
+                          # Extract package name and version using Piston's method
+                          PKGNAME=$(echo "$PKGFILENAME" | grep -oP '^\K.+(?=-)' || echo "$PKGFILENAME" | sed 's/-[^-]*$//')
+                          PKGVERSION=$(echo "$PKGFILENAME" | grep -oP '^.+-\K.+' || echo "$PKGFILENAME" | sed 's/.*-//')
+                          PKGCHECKSUM=$(sha256sum "$PKGFILE" | awk '{print $1}')
                           
-                          # Add new entry
-                          echo "$PKGNAME,$PKGVERSION,$PKGCHECKSUM,$BASEURL$pkg" >> index
-                          echo "Added/Updated package: $PKGNAME-$PKGVERSION"
+                          echo "$PKGNAME,$PKGVERSION,$PKGCHECKSUM,$BASEURL$PKGFILE" >> index
+                          echo "Adding package $PKGNAME-$PKGVERSION"
                       fi
                   done
                   
-                  # Sort the index by package name
-                  sort -t',' -k1,1 index > index.sorted && mv index.sorted index
+                  # Sort the index by package name and version
+                  sort -t',' -k1,1 -k2,2V index > index.sorted && mv index.sorted index
                   
                   echo "Package index created:"
                   cat index
