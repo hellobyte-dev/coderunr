@@ -110,18 +110,38 @@ jobs:
             - name: Create package index
               run: |
                   echo "Creating package index..."
-                  echo "" > index
+                  
+                  # Download existing index if it exists
+                  if curl -f -L -o existing_index https://github.com/${{ github.repository }}/releases/download/packages/index 2>/dev/null; then
+                      echo "Downloaded existing index"
+                      cp existing_index index
+                  else
+                      echo "No existing index found, creating new one"
+                      echo "" > index
+                  fi
+                  
                   BASEURL=https://github.com/${{ github.repository }}/releases/download/packages/
                   
+                  # Process new packages
                   for pkg in *.pkg.tar.gz; do
                       if [[ -f "$pkg" ]]; then
                           PKGNAME=$(echo $pkg | sed 's/\.pkg\.tar\.gz//g' | sed 's/-[^-]*$//')
                           PKGVERSION=$(echo $pkg | sed 's/\.pkg\.tar\.gz//g' | sed 's/.*-//')
                           PKGCHECKSUM=$(sha256sum $pkg | awk '{print $1}')
+                          
+                          # Remove existing entry for this package if it exists
+                          if [[ -f index ]]; then
+                              grep -v "^$PKGNAME," index > index.tmp && mv index.tmp index || true
+                          fi
+                          
+                          # Add new entry
                           echo "$PKGNAME,$PKGVERSION,$PKGCHECKSUM,$BASEURL$pkg" >> index
-                          echo "Added package: $PKGNAME-$PKGVERSION"
+                          echo "Added/Updated package: $PKGNAME-$PKGVERSION"
                       fi
                   done
+                  
+                  # Sort the index by package name
+                  sort -t',' -k1,1 index > index.sorted && mv index.sorted index
                   
                   echo "Package index created:"
                   cat index
