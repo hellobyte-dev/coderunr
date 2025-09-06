@@ -20,3 +20,4 @@ rm -rf build
 
 bin/pip3 install numpy scipy pandas pycryptodome whoosh bcrypt passlib sympy xxhash base58 cryptography PyNaCl
 # Trigger rebuild Sat Sep  6 11:13:45 PM CST 2025
+# Restore python build Sat Sep  6 11:29:13 PM CST 2025
