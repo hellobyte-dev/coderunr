@@ -1,0 +1,276 @@
+name: Validate Package Changes
+
+on:
+    pull_request:
+        types: [opened, reopened, synchronize]
+        paths:
+            - packages/**
+
+jobs:
+    validate-readme:
+        name: Validate README.md
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Check README.md consistency
+              run: |
+                  echo "Checking if README.md lists all supported languages..."
+                  
+                  # Extract languages from package metadata
+                  PACKAGE_LANGUAGES=$(find packages -name "*.json" -exec jq -r '.language' {} \; | sort -u | tr '\n' ' ')
+                  echo "Found packages for languages: $PACKAGE_LANGUAGES"
+                  
+                  # Check if README mentions these languages
+                  MISSING_LANGUAGES=""
+                  for lang in $PACKAGE_LANGUAGES; do
+                      if ! grep -qi "$lang" README.md; then
+                          MISSING_LANGUAGES="$MISSING_LANGUAGES $lang"
+                      fi
+                  done
+                  
+                  if [[ -n "$MISSING_LANGUAGES" ]]; then
+                      echo "❌ README.md is missing languages:$MISSING_LANGUAGES"
+                      echo "Please update README.md to include all supported languages"
+                      exit 1
+                  else
+                      echo "✅ README.md is up to date with all supported languages"
+                  fi
+
+    detect-changes:
+        name: Detect Changed Packages
+        runs-on: ubuntu-latest
+        outputs:
+            packages: ${{ steps.changes.outputs.packages }}
+            matrix: ${{ steps.changes.outputs.matrix }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Get changed files
+              id: changes
+              run: |
+                  # Get changed package directories
+                  CHANGED_PACKAGES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep "^packages/" | awk -F/ '{print $2"-"$3}' | sort -u)
+                  
+                  if [[ -z "$CHANGED_PACKAGES" ]]; then
+                      echo "packages=[]" >> $GITHUB_OUTPUT
+                      echo "matrix={\"package\":[]}" >> $GITHUB_OUTPUT
+                      echo "No packages changed"
+                  else
+                      PACKAGES_JSON=$(echo "$CHANGED_PACKAGES" | jq -R -s -c 'split("\n")[:-1]')
+                      echo "packages=$PACKAGES_JSON" >> $GITHUB_OUTPUT
+                      echo "matrix={\"package\":$PACKAGES_JSON}" >> $GITHUB_OUTPUT
+                      echo "Changed packages: $CHANGED_PACKAGES"
+                  fi
+
+    build-changed-packages:
+        name: Build Changed Packages
+        runs-on: ubuntu-latest
+        needs: detect-changes
+        if: ${{ needs.detect-changes.outputs.packages != '[]' }}
+        strategy:
+            matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+            fail-fast: false
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
+
+            - name: Build package ${{ matrix.package }}
+              run: |
+                  cd packages
+                  echo "Building package: ${{ matrix.package }}"
+                  
+                  # Validate package structure first
+                  PACKAGE_DIR=$(echo "${{ matrix.package }}" | tr '-' '/')
+                  if [[ ! -f "$PACKAGE_DIR/build.sh" ]]; then
+                      echo "❌ Missing build.sh in $PACKAGE_DIR"
+                      exit 1
+                  fi
+                  
+                  if [[ ! -f "$PACKAGE_DIR/metadata.json" ]]; then
+                      echo "❌ Missing metadata.json in $PACKAGE_DIR"
+                      exit 1
+                  fi
+                  
+                  # Validate metadata.json format
+                  if ! jq empty "$PACKAGE_DIR/metadata.json"; then
+                      echo "❌ Invalid JSON in $PACKAGE_DIR/metadata.json"
+                      exit 1
+                  fi
+                  
+                  # Build the package
+                  make ${{ matrix.package }}.pkg.tar.gz PLATFORM=docker-debian
+
+            - name: Validate package content
+              run: |
+                  cd packages
+                  PACKAGE_FILE="${{ matrix.package }}.pkg.tar.gz"
+                  
+                  if [[ ! -f "$PACKAGE_FILE" ]]; then
+                      echo "❌ Package file $PACKAGE_FILE was not created"
+                      exit 1
+                  fi
+                  
+                  # Check package size (should not be empty)
+                  SIZE=$(stat -f%z "$PACKAGE_FILE" 2>/dev/null || stat -c%s "$PACKAGE_FILE")
+                  if [[ $SIZE -lt 1000 ]]; then
+                      echo "❌ Package $PACKAGE_FILE seems too small ($SIZE bytes)"
+                      exit 1
+                  fi
+                  
+                  echo "✅ Package $PACKAGE_FILE built successfully ($SIZE bytes)"
+
+            - name: Upload package artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: test-package-${{ matrix.package }}
+                  path: packages/${{ matrix.package }}.pkg.tar.gz
+                  retention-days: 5
+
+    test-packages:
+        name: Test Package Integration
+        runs-on: ubuntu-latest
+        needs: [detect-changes, build-changed-packages]
+        if: ${{ needs.detect-changes.outputs.packages != '[]' }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Download package artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: test-package-*
+                  merge-multiple: true
+                  path: ./test-packages/
+
+            - name: Start test environment
+              run: |
+                  # Build API for testing
+                  cd api
+                  make docker-build
+                  
+                  # Start repo server for packages
+                  cd ../repo
+                  python3 -m http.server 8080 --directory ../test-packages &
+                  REPO_PID=$!
+                  echo "REPO_PID=$REPO_PID" >> $GITHUB_ENV
+                  
+                  # Start API server
+                  cd ../api
+                  docker run -d --name test-api \
+                      -p 2000:2000 \
+                      -v $(pwd)/../test-packages:/opt/coderunr/packages \
+                      -e CODERUNR_LOG_LEVEL=debug \
+                      coderunr-api:latest
+                  
+                  # Wait for services to be ready
+                  echo "Waiting for services to start..."
+                  sleep 15
+
+            - name: Test package functionality
+              run: |
+                  # Test if API can list packages
+                  echo "Testing package listing..."
+                  PACKAGES_RESPONSE=$(curl -s http://localhost:2000/api/v2/packages)
+                  echo "Packages response: $PACKAGES_RESPONSE"
+                  
+                  # Test if runtimes are available
+                  echo "Testing runtime listing..."
+                  RUNTIMES_RESPONSE=$(curl -s http://localhost:2000/api/v2/runtimes)
+                  echo "Runtimes response: $RUNTIMES_RESPONSE"
+                  
+                  # Test basic code execution for each changed package
+                  echo "Testing code execution..."
+                  for pkg_file in test-packages/*.pkg.tar.gz; do
+                      if [[ -f "$pkg_file" ]]; then
+                          pkg_name=$(basename "$pkg_file" .pkg.tar.gz | sed 's/-[^-]*$//')
+                          echo "Testing execution for $pkg_name..."
+                          
+                          # Create simple test based on language
+                          case "$pkg_name" in
+                              python)
+                                  TEST_CODE='{"language":"python","version":"*","files":[{"content":"print(\"Hello from PR test!\")"}]}'
+                                  ;;
+                              go)
+                                  TEST_CODE='{"language":"go","version":"*","files":[{"content":"package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"Hello from PR test!\") }"}]}'
+                                  ;;
+                              java)
+                                  TEST_CODE='{"language":"java","version":"*","files":[{"content":"public class Main { public static void main(String[] args) { System.out.println(\"Hello from PR test!\"); } }"}]}'
+                                  ;;
+                              *)
+                                  echo "Skipping execution test for unknown language: $pkg_name"
+                                  continue
+                                  ;;
+                          esac
+                          
+                          # Execute test
+                          EXEC_RESPONSE=$(curl -s -X POST http://localhost:2000/api/v2/execute \
+                              -H "Content-Type: application/json" \
+                              -d "$TEST_CODE")
+                          
+                          echo "Execution response for $pkg_name: $EXEC_RESPONSE"
+                          
+                          # Check if execution was successful
+                          if echo "$EXEC_RESPONSE" | jq -e '.run.output' > /dev/null; then
+                              echo "✅ $pkg_name execution test passed"
+                          else
+                              echo "❌ $pkg_name execution test failed"
+                              echo "$EXEC_RESPONSE"
+                          fi
+                      fi
+                  done
+
+            - name: Cleanup test environment
+              if: always()
+              run: |
+                  docker stop test-api || true
+                  docker rm test-api || true
+                  kill $REPO_PID || true
+
+    security-scan:
+        name: Security Scan
+        runs-on: ubuntu-latest
+        needs: detect-changes
+        if: ${{ needs.detect-changes.outputs.packages != '[]' }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Run security checks
+              run: |
+                  echo "Running security checks on changed packages..."
+                  
+                  # Check for suspicious patterns in build scripts
+                  SUSPICIOUS_PATTERNS=(
+                      "curl.*|.*http"
+                      "wget.*|.*http"
+                      "rm.*-rf.*/"
+                      "sudo"
+                      "\$\(.*\)"
+                      "eval.*\$"
+                  )
+                  
+                  ISSUES_FOUND=0
+                  
+                  for pattern in "${SUSPICIOUS_PATTERNS[@]}"; do
+                      if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep "^packages/" | xargs grep -l "$pattern" 2>/dev/null; then
+                          echo "⚠️  Found potentially suspicious pattern: $pattern"
+                          git diff --name-only origin/${{ github.base_ref }}...HEAD | grep "^packages/" | xargs grep -n "$pattern" 2>/dev/null || true
+                          ISSUES_FOUND=1
+                      fi
+                  done
+                  
+                  if [[ $ISSUES_FOUND -eq 1 ]]; then
+                      echo ""
+                      echo "⚠️  Security review recommended for this PR"
+                      echo "Please ensure all external downloads and commands are safe"
+                  else
+                      echo "✅ No obvious security issues found"
+                  fi

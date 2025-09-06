@@ -1,0 +1,170 @@
+name: Build and Publish Packages
+
+on:
+    push:
+        branches:
+            - main
+            - dev
+        paths:
+            - packages/**
+            - .github/workflows/package-push.yaml
+    
+    workflow_dispatch:
+        inputs:
+            packages:
+                description: 'Specific packages to build (comma-separated, e.g., python-3.12.0,go-1.21.0)'
+                required: false
+                default: 'all'
+
+jobs:
+    detect-changes:
+        runs-on: ubuntu-latest
+        outputs:
+            packages: ${{ steps.changes.outputs.packages }}
+            matrix: ${{ steps.changes.outputs.matrix }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Detect changed packages
+              id: changes
+              run: |
+                  if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+                      if [[ "${{ github.event.inputs.packages }}" == "all" ]]; then
+                          PACKAGES=$(find packages -maxdepth 2 -name "build.sh" | awk -F/ '{print $2"-"$3}' | sort | jq -R -s -c 'split("\n")[:-1]')
+                      else
+                          PACKAGES=$(echo "${{ github.event.inputs.packages }}" | tr ',' '\n' | jq -R -s -c 'split("\n")[:-1]')
+                      fi
+                  else
+                      PACKAGES=$(git diff --name-only HEAD~1 HEAD | grep "^packages/" | awk -F/ '{print $2"-"$3}' | sort -u | jq -R -s -c 'split("\n")[:-1]')
+                  fi
+                  
+                  echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
+                  echo "matrix={\"package\":$PACKAGES}" >> $GITHUB_OUTPUT
+                  echo "Detected packages: $PACKAGES"
+
+    build-packages:
+        runs-on: ubuntu-latest
+        needs: detect-changes
+        if: ${{ needs.detect-changes.outputs.packages != '[]' }}
+        strategy:
+            matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+            fail-fast: false
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
+
+            - name: Build package ${{ matrix.package }}
+              run: |
+                  cd packages
+                  echo "Building package: ${{ matrix.package }}"
+                  make ${{ matrix.package }}.pkg.tar.gz PLATFORM=docker-debian
+
+            - name: Upload package artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: package-${{ matrix.package }}
+                  path: packages/${{ matrix.package }}.pkg.tar.gz
+                  retention-days: 30
+
+    publish-packages:
+        runs-on: ubuntu-latest
+        needs: [detect-changes, build-packages]
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Download all package artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: package-*
+                  merge-multiple: true
+
+            - name: Create package index
+              run: |
+                  echo "Creating package index..."
+                  echo "" > index
+                  BASEURL=https://github.com/${{ github.repository }}/releases/download/packages/
+                  
+                  for pkg in *.pkg.tar.gz; do
+                      if [[ -f "$pkg" ]]; then
+                          PKGNAME=$(echo $pkg | sed 's/\.pkg\.tar\.gz//g' | sed 's/-[^-]*$//')
+                          PKGVERSION=$(echo $pkg | sed 's/\.pkg\.tar\.gz//g' | sed 's/.*-//')
+                          PKGCHECKSUM=$(sha256sum $pkg | awk '{print $1}')
+                          echo "$PKGNAME,$PKGVERSION,$PKGCHECKSUM,$BASEURL$pkg" >> index
+                          echo "Added package: $PKGNAME-$PKGVERSION"
+                      fi
+                  done
+                  
+                  echo "Package index created:"
+                  cat index
+
+            - name: Upload packages to release
+              uses: softprops/action-gh-release@v1
+              with:
+                  tag_name: packages
+                  name: Language Packages
+                  body: |
+                      Automatically built language packages for CodeRunr.
+                      
+                      Updated: ${{ github.event.head_commit.timestamp }}
+                      Commit: ${{ github.sha }}
+                  files: |
+                      *.pkg.tar.gz
+                      index
+                  prerelease: false
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    test-packages:
+        runs-on: ubuntu-latest
+        needs: build-packages
+        if: ${{ needs.detect-changes.outputs.packages != '[]' }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Download package artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: package-*
+                  merge-multiple: true
+                  path: ./packages/
+
+            - name: Start CodeRunr API for testing
+              run: |
+                  cd api
+                  make docker-build
+                  docker run -d --name test-api -p 2000:2000 -v $(pwd)/../packages:/opt/coderunr/packages coderunr-api:latest
+                  
+                  # Wait for API to be ready
+                  echo "Waiting for API to start..."
+                  for i in {1..30}; do
+                      if curl -f http://localhost:2000/health > /dev/null 2>&1; then
+                          echo "API is ready!"
+                          break
+                      fi
+                      echo "Waiting... ($i/30)"
+                      sleep 2
+                  done
+
+            - name: Test package installation
+              run: |
+                  # Test if packages can be listed
+                  curl -s http://localhost:2000/api/v2/packages | jq .
+                  
+                  # Test basic package operations
+                  echo "Testing package endpoints..."
+                  curl -f http://localhost:2000/api/v2/runtimes
+
+            - name: Cleanup
+              if: always()
+              run: |
+                  docker stop test-api || true
+                  docker rm test-api || true

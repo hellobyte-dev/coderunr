@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+
+EXECUTION_PATH="$PWD"
+CODERUNR_PATH="$(dirname "$(realpath "$0")")"
+
+cd "$CODERUNR_PATH"
+CODERUNR_ENV=$(cat .coderunr_env 2> /dev/null || echo dev)
+
+docker_compose(){
+    # Use docker compose (newer) or docker-compose (older)
+    if command -v docker > /dev/null && docker compose version > /dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD="docker compose"
+    elif command -v docker-compose > /dev/null; then
+        DOCKER_COMPOSE_CMD="docker-compose"
+    else
+        echo "Error: Neither 'docker compose' nor 'docker-compose' found"
+        exit 1
+    fi
+    
+    if [ -f "docker-compose.$CODERUNR_ENV.yml" ]; then
+        $DOCKER_COMPOSE_CMD -f "docker-compose.$CODERUNR_ENV.yml" "$@"
+    else
+        $DOCKER_COMPOSE_CMD "$@"
+    fi
+}
+
+case $1 in
+    help)
+        echo "=== CodeRunr Management ==="
+        echo "Current Environment: $CODERUNR_ENV"
+        echo
+        echo "Commands:"
+        echo " select <environment>           Select the environment (dev/prod)"
+        echo " docker_compose <args...>       Interact directly with docker-compose"
+        echo " logs [service]                 Show docker-compose logs"
+        echo
+        echo " start                          Starts CodeRunr services"
+        echo " stop                           Stops CodeRunr services"
+        echo " restart [service]              Restarts CodeRunr services"
+        echo " bash [service]                 Opens a bash shell for service (default: api)"
+        echo
+        echo " status                         Show service status"
+        echo " update                         Fetches and applies latest updates"
+        echo " health                         Check service health"
+        echo
+        echo " <args..>                       Passthrough to coderunr CLI tool"
+        echo
+
+        if [ "$CODERUNR_ENV" == "dev" ]; then
+            echo "Development Commands:"
+            echo " clean-pkgs                     Clean any package build artifacts"
+            echo " clean-repo                     Remove all packages from local repo"
+            echo " clean-all                      Clean everything (containers, images, volumes)"
+            echo " list-pkgs                      Lists all packages that can be built"
+            echo " build-pkg <package> <version>  Build a specific package"
+            echo " build-all-pkgs                 Build all packages"
+            echo " rebuild                        Build and restart containers"
+            echo " test                           Run API tests"
+            echo " test-e2e                       Run end-to-end tests"
+            echo " lint                           Lint the codebase"
+            echo " format                         Format the codebase"
+            echo " dev-api                        Run API in development mode"
+            echo " dev-setup                      Setup development environment"
+        else
+            echo " Switch to development environment for more info"
+            echo " > coderunr select dev"
+        fi
+        ;;
+
+    select) 
+        if [[ "$2" == "dev" || "$2" == "prod" ]]; then
+            echo "$2" > .coderunr_env
+            echo "Environment switched to: $2"
+        else
+            echo "Error: Environment must be 'dev' or 'prod'"
+            exit 1
+        fi
+        ;;
+
+    docker_compose) shift; docker_compose "$@";;
+    
+    logs) 
+        if [[ -n "$2" ]]; then
+            docker_compose logs -f "$2"
+        else
+            docker_compose logs -f
+        fi
+        ;;
+
+    status)
+        echo "=== CodeRunr Service Status ==="
+        docker_compose ps
+        echo
+        echo "=== Container Health ==="
+        docker ps --filter "name=coderunr" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+        ;;
+
+    health)
+        echo "=== CodeRunr Health Check ==="
+        echo "Checking API health..."
+        
+        if curl -sf http://localhost:2000/api/v2/packages > /dev/null 2>&1; then
+            echo "✅ API service is healthy"
+        else
+            echo "❌ API service is not responding"
+        fi
+        
+        if curl -sf http://localhost:8000/ > /dev/null 2>&1; then
+            echo "✅ Repository service is healthy"
+        else
+            echo "❌ Repository service is not responding"
+        fi
+        ;;
+
+    restart) 
+        if [[ -n "$2" ]]; then
+            docker_compose restart "$2"
+        else
+            docker_compose restart
+        fi
+        ;;
+        
+    start)
+        echo "🚀 Starting CodeRunr services..."
+        if [[ "$CODERUNR_ENV" == "dev" ]]; then
+            ./start-local.sh
+        else
+            docker_compose up -d
+        fi
+        ;;
+        
+    stop) 
+        echo "🛑 Stopping CodeRunr services..."
+        docker_compose down 
+        ;;
+        
+    bash) 
+        SERVICE="${2:-api}"
+        echo "Opening bash shell for $SERVICE..."
+        docker_compose exec "$SERVICE" /bin/bash
+        ;;
+
+    rebuild)
+        echo "🏗️  Rebuilding and restarting containers..."
+        docker_compose build && docker_compose up -d
+        ;;
+
+    update)
+        echo "🔄 Updating CodeRunr..."
+        git pull
+        
+        # Update CLI if it exists
+        if [[ -f "cli/go.mod" ]]; then
+            cd cli && go mod tidy && go build -o coderunr-cli main.go && cd -
+        fi
+        
+        # Pull latest images
+        docker_compose pull
+        docker_compose up -d
+        echo "✅ Update completed!"
+        ;;
+
+    # Development commands
+    clean-pkgs) 
+        echo "🧹 Cleaning package artifacts..."
+        git clean -fqXd packages 
+        ;;
+        
+    clean-repo) 
+        echo "🧹 Cleaning repository..."
+        git clean -fqXd repo 
+        ;;
+        
+    clean-all)
+        echo "🧹 Cleaning everything..."
+        docker_compose down -v --remove-orphans
+        docker system prune -af
+        git clean -fqXd packages repo
+        echo "✅ Cleanup completed!"
+        ;;
+
+    list-pkgs) 
+        echo "📦 Available packages:"
+        find packages -name "metadata.json" | while read -r file; do
+            dir=$(dirname "$file")
+            if [[ -f "$dir/build.sh" ]]; then
+                lang=$(jq -r '.language // empty' "$file" 2>/dev/null)
+                version=$(jq -r '.version // empty' "$file" 2>/dev/null)
+                if [[ -n "$lang" && -n "$version" ]]; then
+                    echo "  $lang-$version"
+                else
+                    echo "  $(basename "$dir")"
+                fi
+            fi
+        done | sort | column
+        ;;
+
+    build-pkg)
+        if [[ -z "$2" || -z "$3" ]]; then
+            echo "Usage: coderunr build-pkg <language> <version>"
+            echo "Example: coderunr build-pkg python 3.12.0"
+            exit 1
+        fi
+        
+        PKGSLUG="$2-$3"
+        echo "🔨 Building package: $PKGSLUG"
+        
+        cd packages
+        if make "$PKGSLUG.pkg.tar.gz" PLATFORM=docker-debian; then
+            echo "✅ Package $PKGSLUG built successfully"
+        else
+            echo "❌ Failed to build package $PKGSLUG"
+            exit 1
+        fi
+        cd -
+        ;;
+
+    build-all-pkgs)
+        echo "🔨 Building all packages..."
+        cd packages
+        make build-all
+        cd -
+        echo "✅ All packages built!"
+        ;;
+
+    test)
+        echo "🧪 Running API tests..."
+        cd api && make test
+        ;;
+        
+    test-e2e)
+        echo "⚡ Running end-to-end tests..."
+        cd tests && make test-e2e
+        ;;
+
+    lint)
+        echo "🔍 Linting codebase..."
+        if [[ -f "api/Makefile" ]]; then
+            cd api && make lint && cd -
+        fi
+        
+        # Lint shell scripts
+        if command -v shellcheck > /dev/null; then
+            shellcheck ./*.sh
+        fi
+        
+        echo "✅ Linting completed!"
+        ;;
+
+    format)
+        echo "✨ Formatting codebase..."
+        if [[ -f "api/Makefile" ]]; then
+            cd api && make fmt && cd -
+        fi
+        
+        # Format shell scripts with shfmt if available
+        if command -v shfmt > /dev/null; then
+            shfmt -w -i 4 ./*.sh
+        fi
+        
+        echo "✅ Formatting completed!"
+        ;;
+
+    dev-api)
+        echo "🚀 Starting API in development mode..."
+        cd api && make dev
+        ;;
+
+    dev-setup)
+        echo "🛠️  Setting up development environment..."
+        cd api && make setup-dev && cd -
+        echo "✅ Development environment ready!"
+        ;;
+
+    # Default: pass through to CLI
+    *)
+        # Check if CLI exists
+        if [[ -f "./cli/coderunr-cli" ]]; then
+            cd "$EXECUTION_PATH"
+            "${CODERUNR_PATH}/cli/coderunr-cli" "$@"
+        elif [[ -x "./cli/main.go" ]]; then
+            cd "$EXECUTION_PATH"
+            go run "${CODERUNR_PATH}/cli/main.go" "$@"
+        else
+            echo "CodeRunr CLI not found. Try building it first:"
+            echo "  cd cli && go build -o coderunr-cli main.go"
+            exit 1
+        fi
+        ;;
+esac

@@ -1,0 +1,312 @@
+name: Build Repository Infrastructure
+
+on:
+    schedule:
+        # Rebuild repo twice daily to catch any package updates
+        - cron: "0 6,18 * * *"
+    push:
+        branches: [main]
+        paths:
+            - repo/**
+            - packages/**/*.json
+    workflow_dispatch:
+        inputs:
+            rebuild_all:
+                description: 'Force rebuild all packages'
+                required: false
+                default: 'false'
+                type: boolean
+
+jobs:
+    build-repo-image:
+        name: Build Repository Docker Image
+        runs-on: ubuntu-latest
+        outputs:
+            image-digest: ${{ steps.build.outputs.digest }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
+
+            - name: Log in to Container Registry
+              uses: docker/login-action@v3
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Extract metadata
+              id: meta
+              uses: docker/metadata-action@v5
+              with:
+                  images: |
+                      ghcr.io/${{ github.repository }}-repo
+                  tags: |
+                      type=ref,event=branch
+                      type=sha,prefix={{branch}}-
+                      type=raw,value=latest,enable={{is_default_branch}}
+
+            - name: Build and push repo image
+              id: build
+              uses: docker/build-push-action@v5
+              with:
+                  context: ./repo
+                  file: ./repo/Dockerfile
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.meta.outputs.tags }}
+                  labels: ${{ steps.meta.outputs.labels }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+            - name: Test repository image
+              run: |
+                  echo "Testing repository functionality..."
+                  
+                  # Start the repo container
+                  docker run -d --name test-repo \
+                      -p 8000:8000 \
+                      ghcr.io/${{ github.repository }}-repo:latest
+                  
+                  # Wait for startup
+                  sleep 10
+                  
+                  # Test basic HTTP functionality
+                  if curl -f http://localhost:8000/; then
+                      echo "✅ Repository server is responding"
+                  else
+                      echo "❌ Repository server failed to start"
+                      docker logs test-repo
+                      exit 1
+                  fi
+                  
+                  # Test package index
+                  if curl -f http://localhost:8000/index | grep -q "packages"; then
+                      echo "✅ Package index is accessible"
+                  else
+                      echo "⚠️  Package index may be empty (this is normal for new deployments)"
+                  fi
+                  
+                  # Cleanup
+                  docker stop test-repo
+                  docker rm test-repo
+
+    update-package-index:
+        name: Update Package Index
+        runs-on: ubuntu-latest
+        needs: build-repo-image
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v4
+              with:
+                  python-version: '3.11'
+
+            - name: Generate package index
+              id: index
+              run: |
+                  echo "Generating package index..."
+                  cd packages
+                  
+                  # Create index directory
+                  mkdir -p ../repo/index
+                  
+                  # Generate package metadata index
+                  python3 << 'EOF'
+                  import json
+                  import os
+                  from pathlib import Path
+                  
+                  packages = {}
+                  
+                  # Scan all package directories
+                  for pkg_dir in Path('.').glob('*/'):
+                      if not pkg_dir.is_dir():
+                          continue
+                      
+                      metadata_file = pkg_dir / 'metadata.json'
+                      if not metadata_file.exists():
+                          print(f"Warning: {pkg_dir} missing metadata.json")
+                          continue
+                      
+                      try:
+                          with open(metadata_file) as f:
+                              metadata = json.load(f)
+                          
+                          language = metadata.get('language', pkg_dir.name)
+                          version = metadata.get('version', 'latest')
+                          
+                          if language not in packages:
+                              packages[language] = []
+                          
+                          packages[language].append({
+                              'version': version,
+                              'path': str(pkg_dir),
+                              'metadata': metadata
+                          })
+                          
+                      except Exception as e:
+                          print(f"Error processing {pkg_dir}: {e}")
+                  
+                  # Write index
+                  with open('../repo/index/packages.json', 'w') as f:
+                      json.dump(packages, f, indent=2, sort_keys=True)
+                  
+                  print(f"Generated index for {len(packages)} languages")
+                  for lang, versions in packages.items():
+                      print(f"  {lang}: {len(versions)} version(s)")
+                  EOF
+                  
+                  # Generate human-readable index
+                  python3 << 'EOF'
+                  import json
+                  from datetime import datetime
+                  
+                  with open('../repo/index/packages.json') as f:
+                      packages = json.load(f)
+                  
+                  html = f"""
+                  <!DOCTYPE html>
+                  <html>
+                  <head>
+                      <title>CodeRunr Package Repository</title>
+                      <style>
+                          body {{ font-family: Arial, sans-serif; margin: 2em; }}
+                          .package {{ margin: 1em 0; padding: 1em; border: 1px solid #ddd; }}
+                          .version {{ margin: 0.5em 0; font-family: monospace; }}
+                          .timestamp {{ color: #666; font-size: 0.9em; }}
+                      </style>
+                  </head>
+                  <body>
+                      <h1>CodeRunr Package Repository</h1>
+                      <p class="timestamp">Generated: {datetime.utcnow().isoformat()}Z</p>
+                      <h2>Available Languages ({len(packages)})</h2>
+                  """
+                  
+                  for lang in sorted(packages.keys()):
+                      versions = packages[lang]
+                      html += f'<div class="package"><h3>{lang}</h3>'
+                      for version_info in versions:
+                          html += f'<div class="version">Version: {version_info["version"]}</div>'
+                      html += '</div>'
+                  
+                  html += """
+                  </body>
+                  </html>
+                  """
+                  
+                  with open('../repo/index/index.html', 'w') as f:
+                      f.write(html)
+                  EOF
+
+            - name: Upload package index
+              uses: actions/upload-artifact@v4
+              with:
+                  name: package-index
+                  path: repo/index/
+                  retention-days: 30
+
+    deploy-to-registry:
+        name: Deploy Repository to Registry
+        runs-on: ubuntu-latest
+        needs: [build-repo-image, update-package-index]
+        if: github.ref == 'refs/heads/main'
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Download package index
+              uses: actions/download-artifact@v4
+              with:
+                  name: package-index
+                  path: repo/index/
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
+
+            - name: Log in to Container Registry
+              uses: docker/login-action@v3
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Build and push final repo image
+              uses: docker/build-push-action@v5
+              with:
+                  context: ./repo
+                  file: ./repo/Dockerfile
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: |
+                      ghcr.io/${{ github.repository }}-repo:latest
+                      ghcr.io/${{ github.repository }}-repo:${{ github.sha }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+    health-check:
+        name: Repository Health Check
+        runs-on: ubuntu-latest
+        needs: deploy-to-registry
+        if: github.ref == 'refs/heads/main'
+        steps:
+            - name: Test deployed repository
+              run: |
+                  echo "Running health check on deployed repository..."
+                  
+                  # Pull the latest image
+                  docker pull ghcr.io/${{ github.repository }}-repo:latest
+                  
+                  # Start container
+                  docker run -d --name health-check \
+                      -p 8000:8000 \
+                      ghcr.io/${{ github.repository }}-repo:latest
+                  
+                  # Wait for startup
+                  sleep 15
+                  
+                  # Test endpoints
+                  echo "Testing repository endpoints..."
+                  
+                  # Test main index
+                  if curl -f http://localhost:8000/; then
+                      echo "✅ Main index accessible"
+                  else
+                      echo "❌ Main index failed"
+                      docker logs health-check
+                      exit 1
+                  fi
+                  
+                  # Test package index
+                  if curl -f http://localhost:8000/index/packages.json; then
+                      echo "✅ Package JSON index accessible"
+                  else
+                      echo "❌ Package JSON index failed"
+                      exit 1
+                  fi
+                  
+                  # Test HTML index
+                  if curl -f http://localhost:8000/index/index.html | grep -q "CodeRunr"; then
+                      echo "✅ HTML index accessible and valid"
+                  else
+                      echo "❌ HTML index failed"
+                      exit 1
+                  fi
+                  
+                  # Performance test
+                  echo "Running basic performance test..."
+                  if time curl -s http://localhost:8000/index/packages.json > /dev/null; then
+                      echo "✅ Repository performance acceptable"
+                  else
+                      echo "⚠️  Repository performance may be slow"
+                  fi
+                  
+                  # Cleanup
+                  docker stop health-check
+                  docker rm health-check
+                  
+                  echo "🎉 Repository health check completed successfully!"

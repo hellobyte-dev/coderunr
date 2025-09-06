@@ -23,6 +23,28 @@ coderunr/
 
 ## Quick Start
 
+### Using the Management Script (Recommended)
+
+CodeRunr provides a unified management script similar to Piston's approach:
+
+```bash
+# Show all available commands
+./coderunr help
+
+# Start development environment
+./coderunr start
+
+# Check service health
+./coderunr health
+
+# Use CLI directly through the script
+./coderunr execute python3 "print('Hello World')"
+```
+
+See [MANAGEMENT.md](MANAGEMENT.md) for complete management script documentation.
+
+### Manual Setup
+
 ### Prerequisites
 
 - Go 1.21 or later
