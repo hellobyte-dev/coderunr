@@ -65,10 +65,11 @@ jobs:
                   tags: |
                       type=ref,event=branch
                       type=ref,event=pr
-                      type=sha,prefix={{branch}}-
+                      type=sha,prefix={{branch}}-,format=short
                       type=raw,value=latest,enable={{is_default_branch}}
 
             - name: Build and push API image
+              id: build
               uses: docker/build-push-action@v5
               with:
                   context: api
@@ -80,7 +81,20 @@ jobs:
 
             - name: Test container startup
               run: |
-                  docker run --rm -d --name test-api -p 2001:2000 ghcr.io/${{ github.repository }}/api:${{ github.sha }}
+                  # Use the first tag from the metadata output
+                  IMAGE_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+                  echo "Testing with image: $IMAGE_TAG"
+                  
+                  docker run --rm -d --name test-api -p 2001:2000 "$IMAGE_TAG"
                   sleep 10
-                  curl -f http://localhost:2001/health || exit 1
+                  
+                  # Test health endpoint
+                  if curl -f http://localhost:2001/api/v2/packages > /dev/null 2>&1; then
+                      echo "✅ API container started successfully"
+                  else
+                      echo "❌ API container health check failed"
+                      docker logs test-api
+                      exit 1
+                  fi
+                  
                   docker stop test-api
