@@ -58,3 +58,13 @@ else
     echo "Skipping starting index server"
 fi
 exit 0
+echo "Index created"
+
+if [[ $SERVER -eq 1 ]]; then
+    echo "Starting index server.."
+    # We want the child process to replace the shell to handle signals
+    exec python3 /serve.py
+else
+    echo "Skipping starting index server"
+fi
+exit 0
