@@ -8,9 +8,10 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/fatih/color"
 	"github.com/gorilla/websocket"
@@ -82,8 +83,10 @@ func executeInteractiveWS(baseURL, language, version string, files []FileData, a
 	// System signals forwarding
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
+	defer signal.Stop(interrupt)
 	signalsCh := make(chan os.Signal, 4)
 	signal.Notify(signalsCh, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)
+	defer signal.Stop(signalsCh)
 
 	// Channel to receive messages
 	messages := make(chan WSMessage, 10)
@@ -115,11 +118,15 @@ func executeInteractiveWS(baseURL, language, version string, files []FileData, a
 		for {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
-				_ = writeJSON(map[string]interface{}{
+				if werr := writeJSON(map[string]interface{}{
 					"type":   "data",
 					"stream": "stdin",
 					"data":   string(buf[:n]),
-				})
+				}); werr != nil {
+					// terminate on write failure
+					cancel()
+					return
+				}
 			}
 			if err != nil {
 				if err != io.EOF {
@@ -141,10 +148,13 @@ func executeInteractiveWS(baseURL, language, version string, files []FileData, a
 			select {
 			case sig := <-signalsCh:
 				sigName := toSignalName(sig)
-				_ = writeJSON(map[string]interface{}{
+				if werr := writeJSON(map[string]interface{}{
 					"type":   "signal",
 					"signal": sigName,
-				})
+				}); werr != nil {
+					cancel()
+					return
+				}
 			case <-ctx.Done():
 				return
 			}
@@ -214,7 +224,7 @@ func executeInteractiveWS(baseURL, language, version string, files []FileData, a
 
 			case "exit": // backward compatibility
 				if showStatus || verbose {
-					bold.Printf("\n== %s Exit ==\n", strings.Title(msg.Stage))
+					bold.Printf("\n== %s Exit ==\n", title(msg.Stage))
 
 					if msg.Code != nil {
 						if *msg.Code == 0 {
@@ -234,12 +244,12 @@ func executeInteractiveWS(baseURL, language, version string, files []FileData, a
 
 			case "stage_start":
 				if showStatus || verbose {
-					bold.Printf("== %s ==\n", strings.Title(msg.Stage))
+					bold.Printf("== %s ==\n", title(msg.Stage))
 				}
 
 			case "stage_end":
 				if showStatus || verbose {
-					bold.Printf("\n== %s Exit ==\n", strings.Title(msg.Stage))
+					bold.Printf("\n== %s Exit ==\n", title(msg.Stage))
 					if msg.Code != nil {
 						if *msg.Code == 0 {
 							fmt.Print("Exit Code: ")
@@ -262,7 +272,7 @@ func executeInteractiveWS(baseURL, language, version string, files []FileData, a
 
 			case "stage": // compatibility
 				if showStatus || verbose {
-					bold.Printf("== %s ==\n", strings.Title(msg.Stage))
+					bold.Printf("== %s ==\n", title(msg.Stage))
 				}
 
 			case "init_ack":
@@ -328,4 +338,16 @@ func toSignalName(sig os.Signal) string {
 	default:
 		return sig.String()
 	}
+}
+
+// title returns the string with its first rune title-cased.
+func title(s string) string {
+	if s == "" {
+		return s
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	if r == utf8.RuneError && size == 0 {
+		return s
+	}
+	return string(unicode.ToTitle(r)) + s[size:]
 }
