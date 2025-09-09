@@ -43,7 +43,7 @@ type ExecuteResponse struct {
 type StageResult struct {
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
-	Code     int    `json:"code"`
+	Code     *int   `json:"code"`
 	Signal   string `json:"signal,omitempty"`
 	Memory   int64  `json:"memory"`
 	CPUTime  int64  `json:"cpu_time"`
@@ -209,7 +209,7 @@ func executeNonInteractive(url, language, version string, files []FileData, args
 
 func printExecutionResult(response ExecuteResponse, verbose bool) error {
 	// Print compile stage if present
-	if response.Compile.Stdout != "" || response.Compile.Stderr != "" || response.Compile.Code != 0 {
+	if response.Compile.Stdout != "" || response.Compile.Stderr != "" || response.Compile.Code != nil || response.Compile.Signal != "" || response.Compile.Memory != 0 || response.Compile.CPUTime != 0 || response.Compile.WallTime != 0 {
 		printStage("Compile", response.Compile, verbose)
 	}
 
@@ -237,13 +237,15 @@ func printStage(stageName string, result StageResult, verbose bool) {
 		fmt.Print(indentLines(result.Stderr))
 	}
 
-	if verbose || result.Code != 0 {
-		if result.Code == 0 {
-			fmt.Print("Exit Code: ")
-			green.Printf("%d\n", result.Code)
-		} else {
-			fmt.Print("Exit Code: ")
-			red.Printf("%d\n", result.Code)
+	if verbose || (result.Code != nil && *result.Code != 0) {
+		if result.Code != nil {
+			if *result.Code == 0 {
+				fmt.Print("Exit Code: ")
+				green.Printf("%d\n", *result.Code)
+			} else {
+				fmt.Print("Exit Code: ")
+				red.Printf("%d\n", *result.Code)
+			}
 		}
 	}
 

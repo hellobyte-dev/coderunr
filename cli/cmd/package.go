@@ -180,18 +180,26 @@ func listPackages(baseURL, language string, verbose bool) error {
 }
 
 func packageAction(baseURL, action, language string, packages []string, verbose bool) error {
-	for _, packageName := range packages {
-		request := map[string]string{
-			"language": packageName, // The package name is actually the language
-			"version":  "*",         // Default to latest version
+	client := &http.Client{Timeout: 60 * time.Second}
+	for _, pkgSpec := range packages {
+		// 支持简单的 name 或 name==version / name=version 形式
+		name := pkgSpec
+		version := "*"
+		if parts := strings.SplitN(pkgSpec, "==", 2); len(parts) == 2 {
+			name, version = parts[0], parts[1]
+		} else if parts := strings.SplitN(pkgSpec, "=", 2); len(parts) == 2 {
+			name, version = parts[0], parts[1]
 		}
 
-		reqBody, err := json.Marshal(request)
+		// coderunr API 期望 {language, version}
+		reqObj := map[string]string{
+			"language": language,
+			"version":  version,
+		}
+		reqBody, err := json.Marshal(reqObj)
 		if err != nil {
 			return fmt.Errorf("failed to marshal request: %w", err)
 		}
-
-		client := &http.Client{Timeout: 60 * time.Second}
 
 		var resp *http.Response
 		if action == "install" {
@@ -202,32 +210,43 @@ func packageAction(baseURL, action, language string, packages []string, verbose 
 				return fmt.Errorf("failed to create request: %w", reqErr)
 			}
 			req.Header.Set("Content-Type", "application/json")
-			var doErr error
-			resp, doErr = client.Do(req)
-			if doErr != nil {
-				return fmt.Errorf("failed to execute %s: %w", action, doErr)
-			}
+			resp, err = client.Do(req)
 		} else {
 			return fmt.Errorf("unsupported action: %s", action)
 		}
-
 		if err != nil {
 			return fmt.Errorf("failed to execute %s: %w", action, err)
 		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			fmt.Printf("Failed to %s %s: %s\n", action, packageName, string(body))
+		// 处理 201/204/200
+		if resp.StatusCode == http.StatusNoContent { // 204
+			fmt.Printf("Successfully %sed %s %s\n", action, language, version)
+			resp.Body.Close()
 			continue
 		}
-
-		var response map[string]string
-		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-			return fmt.Errorf("failed to decode response: %w", err)
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+			body, _ := io.ReadAll(resp.Body)
+			fmt.Printf("Failed to %s %s: %s\n", action, name, string(body))
+			resp.Body.Close()
+			continue
 		}
-
-		fmt.Printf("Successfully %sed %s %s\n", action, response["language"], response["version"])
+		// 尝试解析 JSON，若为空体或解析失败，仍视为成功
+		var response map[string]string
+		decErr := json.NewDecoder(resp.Body).Decode(&response)
+		resp.Body.Close()
+		if decErr == nil {
+			lang := response["language"]
+			ver := response["version"]
+			if lang == "" {
+				lang = language
+			}
+			if ver == "" {
+				ver = version
+			}
+			fmt.Printf("Successfully %sed %s %s\n", action, lang, ver)
+		} else {
+			// 如 201 但无 body
+			fmt.Printf("Successfully %sed %s %s\n", action, language, version)
+		}
 	}
 
 	return nil

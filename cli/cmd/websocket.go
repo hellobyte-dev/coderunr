@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/signal"
 	"strings"
-	"time"
+	"sync"
+	"syscall"
 
 	"github.com/fatih/color"
 	"github.com/gorilla/websocket"
@@ -65,12 +67,23 @@ func executeInteractiveWS(baseURL, language, version string, files []FileData, a
 		fmt.Printf("Connected to WebSocket: %s\n", wsURL+"/api/v2/connect")
 	}
 
-	// Setup signal handling for graceful shutdown
+	// Setup signal handling and context
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Writer mutex to serialize writes
+	var writeMu sync.Mutex
+	writeJSON := func(v interface{}) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return conn.WriteJSON(v)
+	}
+
+	// System signals forwarding
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
+	signalsCh := make(chan os.Signal, 4)
+	signal.Notify(signalsCh, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)
 
 	// Channel to receive messages
 	messages := make(chan WSMessage, 10)
@@ -96,6 +109,48 @@ func executeInteractiveWS(baseURL, language, version string, files []FileData, a
 		}
 	}()
 
+	// Forward stdin to WS as data stream
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				_ = writeJSON(map[string]interface{}{
+					"type":   "data",
+					"stream": "stdin",
+					"data":   string(buf[:n]),
+				})
+			}
+			if err != nil {
+				if err != io.EOF {
+					// Non-fatal: just stop forwarding
+				}
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+	}()
+
+	// Forward OS signals to WS
+	go func() {
+		for {
+			select {
+			case sig := <-signalsCh:
+				sigName := toSignalName(sig)
+				_ = writeJSON(map[string]interface{}{
+					"type":   "signal",
+					"signal": sigName,
+				})
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	// Send init request
 	payload := WSJobPayload{
 		Language: language,
@@ -109,7 +164,7 @@ func executeInteractiveWS(baseURL, language, version string, files []FileData, a
 		Payload: payload,
 	}
 
-	if err := conn.WriteJSON(request); err != nil {
+	if err := writeJSON(request); err != nil {
 		return fmt.Errorf("failed to send execute request: %w", err)
 	}
 
@@ -127,14 +182,12 @@ func executeInteractiveWS(baseURL, language, version string, files []FileData, a
 	for {
 		select {
 		case <-interrupt:
-			fmt.Println("\nReceived interrupt signal, closing connection...")
-
-			// Send close message
-			conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-
-			// Wait for close
-			time.Sleep(time.Second)
-			return nil
+			// Send SIGINT to remote instead of immediate close
+			_ = writeJSON(map[string]interface{}{
+				"type":   "signal",
+				"signal": "SIGINT",
+			})
+			// Do not return; let server handle termination
 
 		case msg, ok := <-messages:
 			if !ok {
@@ -159,7 +212,7 @@ func executeInteractiveWS(baseURL, language, version string, files []FileData, a
 					}
 				}
 
-			case "exit":
+			case "exit": // backward compatibility
 				if showStatus || verbose {
 					bold.Printf("\n== %s Exit ==\n", strings.Title(msg.Stage))
 
@@ -179,22 +232,52 @@ func executeInteractiveWS(baseURL, language, version string, files []FileData, a
 					}
 				}
 
+			case "stage_start":
+				if showStatus || verbose {
+					bold.Printf("== %s ==\n", strings.Title(msg.Stage))
+				}
+
+			case "stage_end":
+				if showStatus || verbose {
+					bold.Printf("\n== %s Exit ==\n", strings.Title(msg.Stage))
+					if msg.Code != nil {
+						if *msg.Code == 0 {
+							fmt.Print("Exit Code: ")
+							green.Printf("%d\n", *msg.Code)
+						} else {
+							fmt.Print("Exit Code: ")
+							red.Printf("%d\n", *msg.Code)
+						}
+					}
+					if msg.Signal != "" {
+						fmt.Print("Signal: ")
+						yellow.Printf("%s\n", msg.Signal)
+					}
+				}
+
 			case "runtime":
 				if verbose {
 					fmt.Printf("Runtime: %s %s\n", msg.Language, msg.Version)
 				}
 
-			case "stage":
+			case "stage": // compatibility
 				if showStatus || verbose {
 					bold.Printf("== %s ==\n", strings.Title(msg.Stage))
 				}
 
-			case "error":
-				red.Printf("Error: %s\n", msg.Error)
-				if msg.Message != "" {
-					red.Printf("Message: %s\n", msg.Message)
+			case "init_ack":
+				if showStatus || verbose {
+					bold.Printf("== Initialization Acknowledged ==\n")
 				}
-				return fmt.Errorf("execution error: %s", msg.Error)
+
+			case "error":
+				// Prefer unified {message} field
+				errMsg := msg.Message
+				if errMsg == "" {
+					errMsg = msg.Error
+				}
+				red.Printf("Error: %s\n", errMsg)
+				return fmt.Errorf("execution error: %s", errMsg)
 
 			default:
 				if verbose {
@@ -224,4 +307,25 @@ func convertToWebSocketURL(httpURL string) (string, error) {
 	}
 
 	return u.String(), nil
+}
+
+func toSignalName(sig os.Signal) string {
+	// Map common signals to names
+	switch s := sig.(type) {
+	case syscall.Signal:
+		switch s {
+		case syscall.SIGINT:
+			return "SIGINT"
+		case syscall.SIGTERM:
+			return "SIGTERM"
+		case syscall.SIGQUIT:
+			return "SIGQUIT"
+		case syscall.SIGHUP:
+			return "SIGHUP"
+		default:
+			return fmt.Sprintf("SIG%s", s.String())
+		}
+	default:
+		return sig.String()
+	}
 }
