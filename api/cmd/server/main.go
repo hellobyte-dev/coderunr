@@ -66,18 +66,24 @@ func main() {
 	r.Use(middleware.Logger(logger))
 	r.Use(middleware.Recovery(logger))
 	r.Use(middleware.CORS())
-	r.Use(chiMiddleware.Timeout(60 * time.Second))
 	// Limit POST/DELETE body size
 	r.Use(middleware.BodyLimit(cfg.RequestBodyLimit))
 
 	// API routes
 	r.Route("/api/v2", func(r chi.Router) {
-		// JSON middleware for JSON POST/DELETE routes
+		// JSON middleware for JSON POST/DELETE routes with different timeouts per group
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.JSON)
-			r.Post("/execute", h.ExecuteCode)
-			// Package management routes (POST/DELETE require JSON)
-			packageHandler.RegisterRoutes(r)
+			// Short timeout group (execute)
+			r.Group(func(r chi.Router) {
+				r.Use(chiMiddleware.Timeout(60 * time.Second))
+				r.Post("/execute", h.ExecuteCode)
+			})
+			// Long timeout group (packages install/uninstall/list)
+			r.Group(func(r chi.Router) {
+				r.Use(chiMiddleware.Timeout(30 * time.Minute))
+				packageHandler.RegisterRoutes(r)
+			})
 		})
 
 		// WebSocket route (no JSON middleware)

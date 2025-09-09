@@ -42,7 +42,8 @@ func NewPackageService(cfg *config.Config, logger *logrus.Logger, runtimeManager
 func (ps *PackageService) GetPackageList() ([]*types.Package, error) {
 	ps.logger.Debug("Fetching package list from repository")
 
-	resp, err := http.Get(ps.cfg.RepoURL)
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Get(ps.cfg.RepoURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch package list: %w", err)
 	}
@@ -237,7 +238,8 @@ func (ps *PackageService) getInstallPath(pkg *types.Package) string {
 func (ps *PackageService) downloadPackage(url, destPath string) error {
 	ps.logger.Debugf("Downloading package from %s to %s", url, destPath)
 
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 15 * time.Minute}
+	resp, err := client.Get(url)
 	if err != nil {
 		return err
 	}

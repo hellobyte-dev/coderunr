@@ -1,0 +1,6 @@
+# CodeRunr builder spec
+# 格式：<language> <version>
+
+python 3.12.0
+java 15.0.2
+go 1.16.2

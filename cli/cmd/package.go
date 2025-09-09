@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -59,8 +60,113 @@ Available actions:
 	cmd.AddCommand(NewPackageListCommand())
 	cmd.AddCommand(NewPackageInstallCommand())
 	cmd.AddCommand(NewPackageUninstallCommand())
+	cmd.AddCommand(NewPackageSpecCommand())
 
 	return cmd
+}
+
+// NewPackageSpecCommand applies a spec file like:
+//
+//	<language> <version>
+//
+// Lines beginning with # or blank lines are ignored.
+func NewPackageSpecCommand() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "spec <specfile>",
+		Short: "Apply a package spec file",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			specPath := args[0]
+			baseURL, _ := cmd.Flags().GetString("url")
+			verbose, _ := cmd.Flags().GetBool("verbose")
+
+			// Wait for API readiness up to 60s
+			client := &http.Client{Timeout: 2 * time.Second}
+			ready := false
+			for i := 0; i < 60; i++ {
+				resp, err := client.Get(baseURL + "/api/v2/runtimes")
+				if err == nil && resp.StatusCode == http.StatusOK {
+					resp.Body.Close()
+					ready = true
+					break
+				}
+				if resp != nil {
+					resp.Body.Close()
+				}
+				time.Sleep(1 * time.Second)
+			}
+			if !ready {
+				return fmt.Errorf("API not ready at %s", baseURL)
+			}
+
+			f, err := os.Open(specPath)
+			if err != nil {
+				return fmt.Errorf("failed to open spec: %w", err)
+			}
+			defer f.Close()
+
+			scanner := bufio.NewScanner(f)
+			scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+			failures := 0
+			lineNo := 0
+			for scanner.Scan() {
+				lineNo++
+				line := scanner.Text()
+				if i := strings.Index(line, "#"); i >= 0 { // strip comments
+					line = line[:i]
+				}
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				parts := strings.Fields(line)
+				if len(parts) < 2 {
+					if verbose {
+						fmt.Fprintf(os.Stderr, "skip line %d: %q\n", lineNo, line)
+					}
+					continue
+				}
+				lang, ver := parts[0], parts[1]
+				if err := installLanguageVersion(baseURL, lang, ver); err != nil {
+					failures++
+					fmt.Fprintf(os.Stderr, "Failed to install %s %s: %v\n", lang, ver, err)
+				} else if verbose {
+					fmt.Fprintf(os.Stdout, "Installed %s %s\n", lang, ver)
+				}
+			}
+			if scanErr := scanner.Err(); scanErr != nil {
+				return fmt.Errorf("failed to read spec: %w", scanErr)
+			}
+			if failures > 0 {
+				return fmt.Errorf("spec apply completed with %d failure(s)", failures)
+			}
+			return nil
+		},
+	}
+	return c
+}
+
+func installLanguageVersion(baseURL, language, version string) error {
+	client := &http.Client{Timeout: 60 * time.Second}
+	reqObj := map[string]string{
+		"language": language,
+		"version":  version,
+	}
+	reqBody, err := json.Marshal(reqObj)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	resp, err := client.Post(baseURL+"/api/v2/packages", "application/json", strings.NewReader(string(reqBody)))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+		return nil
+	}
+	b, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("status %d: %s", resp.StatusCode, string(b))
 }
 
 func NewPackageListCommand() *cobra.Command {
