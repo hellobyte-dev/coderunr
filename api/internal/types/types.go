@@ -42,34 +42,38 @@ type MemoryLimits struct {
 
 // Runtime represents a language runtime environment
 type Runtime struct {
-	Language        string          `json:"language"`
-	Version         *semver.Version `json:"version"`
-	Aliases         []string        `json:"aliases"`
-	PkgDir          string          `json:"pkgdir"`
-	Runtime         string          `json:"runtime"`
-	Timeouts        Timeouts        `json:"timeouts"`
-	CPUTimes        CPUTimes        `json:"cpu_times"`
-	MemoryLimits    MemoryLimits    `json:"memory_limits"`
-	MaxProcessCount int             `json:"max_process_count"`
-	MaxOpenFiles    int             `json:"max_open_files"`
-	MaxFileSize     int64           `json:"max_file_size"`
-	OutputMaxSize   int             `json:"output_max_size"`
-	Compiled        bool            `json:"compiled"`
-	EnvVars         []string        `json:"env_vars"`
+	Language string          `json:"language"`
+	Version  *semver.Version `json:"version"`
+	Aliases  []string        `json:"aliases"`
+	// Platform information (optional)
+	Platform        string       `json:"platform,omitempty"`
+	OS              string       `json:"os,omitempty"`
+	Arch            string       `json:"arch,omitempty"`
+	PkgDir          string       `json:"pkgdir"`
+	Runtime         string       `json:"runtime"`
+	Timeouts        Timeouts     `json:"timeouts"`
+	CPUTimes        CPUTimes     `json:"cpu_times"`
+	MemoryLimits    MemoryLimits `json:"memory_limits"`
+	MaxProcessCount int          `json:"max_process_count"`
+	MaxOpenFiles    int          `json:"max_open_files"`
+	MaxFileSize     int64        `json:"max_file_size"`
+	OutputMaxSize   int          `json:"output_max_size"`
+	Compiled        bool         `json:"compiled"`
+	EnvVars         []string     `json:"env_vars"`
 }
 
 // StageResult represents the result of a compilation or execution stage
 type StageResult struct {
-	Stdout   string        `json:"stdout"`
-	Stderr   string        `json:"stderr"`
-	Output   string        `json:"output"`
-	Code     int           `json:"code"`
-	Signal   string        `json:"signal,omitempty"`
-	Memory   int64         `json:"memory"`
-	Message  string        `json:"message,omitempty"`
-	Status   string        `json:"status,omitempty"`
-	CPUTime  time.Duration `json:"cpu_time"`
-	WallTime time.Duration `json:"wall_time"`
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	Output   string `json:"output"`
+	Code     *int   `json:"code"`
+	Signal   string `json:"signal,omitempty"`
+	Memory   int64  `json:"memory"`
+	Message  string `json:"message,omitempty"`
+	Status   string `json:"status,omitempty"`
+	CPUTime  int64  `json:"cpu_time"`  // milliseconds
+	WallTime int64  `json:"wall_time"` // milliseconds
 }
 
 // ExecutionResult represents the complete result of job execution
@@ -78,6 +82,21 @@ type ExecutionResult struct {
 	Run      *StageResult `json:"run"`
 	Language string       `json:"language"`
 	Version  string       `json:"version"`
+	// Optional: echo back the effective limits used for this execution
+	Limits *struct {
+		Timeouts struct {
+			Compile int `json:"compile"`
+			Run     int `json:"run"`
+		} `json:"timeouts"`
+		CPUTimes struct {
+			Compile int `json:"compile"`
+			Run     int `json:"run"`
+		} `json:"cpu_times"`
+		MemoryLimits struct {
+			Compile int64 `json:"compile"`
+			Run     int64 `json:"run"`
+		} `json:"memory_limits"`
+	} `json:"limits,omitempty"`
 }
 
 // JobRequest represents an incoming job execution request
@@ -123,15 +142,20 @@ type RuntimeInfo struct {
 	Version  string   `json:"version"`
 	Aliases  []string `json:"aliases"`
 	Runtime  string   `json:"runtime,omitempty"`
+	Platform string   `json:"platform,omitempty"`
+	OS       string   `json:"os,omitempty"`
+	Arch     string   `json:"arch,omitempty"`
 }
 
 // WebSocketMessage represents a WebSocket message
 type WebSocketMessage struct {
-	Type     string      `json:"type"`
-	Stream   string      `json:"stream,omitempty"`
-	Data     string      `json:"data,omitempty"`
-	Stage    string      `json:"stage,omitempty"`
-	Signal   string      `json:"signal,omitempty"`
+	Type   string `json:"type"`
+	Stream string `json:"stream,omitempty"`
+	Data   string `json:"data,omitempty"`
+	Stage  string `json:"stage,omitempty"`
+	Signal string `json:"signal,omitempty"`
+	// Prefer message for error texts to align with piston; keep Error for backward-compat in clients
+	Message  string      `json:"message,omitempty"`
 	Error    string      `json:"error,omitempty"`
 	Code     *int        `json:"code,omitempty"`
 	Language string      `json:"language,omitempty"`

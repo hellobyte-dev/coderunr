@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -56,8 +57,8 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Start event sender goroutine
 	go wsConn.eventSender()
 
-	// Set up initialization timeout
-	initTimeout := time.NewTimer(1 * time.Second)
+	// Set up initialization timeout (more tolerant for network/JSON delays)
+	initTimeout := time.NewTimer(5 * time.Second)
 	defer initTimeout.Stop()
 
 	go func() {
@@ -77,8 +78,9 @@ func (wsConn *WebSocketConnection) handleMessages(ctx context.Context) {
 	defer wsConn.close(1000, "Connection closed")
 
 	for {
-		var msg types.WebSocketMessage
-		if err := wsConn.conn.ReadJSON(&msg); err != nil {
+		// Read raw message to support both payload and top-level init formats
+		_, data, err := wsConn.conn.ReadMessage()
+		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				wsConn.logger.WithError(err).Error("WebSocket read error")
 			}
@@ -88,9 +90,35 @@ func (wsConn *WebSocketConnection) handleMessages(ctx context.Context) {
 		// Reset read deadline
 		wsConn.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
-		if err := wsConn.handleMessage(ctx, msg); err != nil {
-			wsConn.sendError(err.Error())
+		// Determine message type
+		var raw map[string]interface{}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			wsConn.sendError("Invalid message JSON")
 			break
+		}
+		msgType, _ := raw["type"].(string)
+
+		switch msgType {
+		case "init":
+			if err := wsConn.handleInitRaw(ctx, raw); err != nil {
+				wsConn.sendError(err.Error())
+				return
+			}
+		case "data", "signal":
+			var msg types.WebSocketMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				wsConn.sendError("Invalid message fields")
+				return
+			}
+			if err := wsConn.handleMessage(ctx, msg); err != nil {
+				wsConn.sendError(err.Error())
+				return
+			}
+		default:
+			// For unknown message types, send an error but keep connection open
+			// so clients can continue without being disconnected.
+			wsConn.sendError("Unknown message type: " + msgType)
+			continue
 		}
 	}
 }
@@ -141,19 +169,185 @@ func (wsConn *WebSocketConnection) handleInit(ctx context.Context, msg types.Web
 	// Create job
 	wsConn.job = wsConn.jobManager.NewJob(rt, &request)
 
-	// Send runtime info
+	// Send runtime info then init_ack to acknowledge initialization
 	wsConn.sendMessage(types.WebSocketMessage{
-		Type: "runtime",
-		Payload: map[string]string{
-			"language": rt.Language,
-			"version":  rt.Version.String(),
-		},
+		Type:     "runtime",
+		Language: rt.Language,
+		Version:  rt.Version.String(),
 	})
+	wsConn.sendMessage(types.WebSocketMessage{Type: "init_ack"})
 
 	// Execute job in background
 	go wsConn.executeJob(ctx)
 
 	return nil
+}
+
+// handleInitRaw handles init from a raw JSON map supporting both payload and top-level fields
+func (wsConn *WebSocketConnection) handleInitRaw(ctx context.Context, raw map[string]interface{}) error {
+	if wsConn.job != nil {
+		wsConn.close(4000, "Already Initialized")
+		return nil
+	}
+
+	// Determine the request map (payload or top-level)
+	var reqMap map[string]interface{}
+	if p, ok := raw["payload"]; ok {
+		if m, ok := p.(map[string]interface{}); ok {
+			reqMap = m
+		}
+	}
+	if reqMap == nil {
+		reqMap = raw
+	}
+
+	// Build JobRequest
+	request, err := buildJobRequestFromMap(reqMap)
+	if err != nil {
+		return wsConn.sendError(err.Error())
+	}
+
+	// Validate
+	if err := wsConn.validateJobRequest(request); err != nil {
+		return wsConn.sendError(err.Error())
+	}
+
+	// Find runtime
+	rt, err := runtime.GetLatestRuntimeMatchingLanguageVersion(request.Language, request.Version)
+	if err != nil {
+		return wsConn.sendError("Runtime not found: " + request.Language + "-" + request.Version)
+	}
+
+	wsConn.job = wsConn.jobManager.NewJob(rt, request)
+
+	// Send runtime info (top-level fields) then init_ack
+	wsConn.sendMessage(types.WebSocketMessage{Type: "runtime", Language: rt.Language, Version: rt.Version.String()})
+	wsConn.sendMessage(types.WebSocketMessage{Type: "init_ack"})
+
+	go wsConn.executeJob(ctx)
+	return nil
+}
+
+// buildJobRequestFromMap converts an init map into a JobRequest
+func buildJobRequestFromMap(m map[string]interface{}) (*types.JobRequest, error) {
+	jr := &types.JobRequest{}
+	if v, ok := m["language"].(string); ok {
+		jr.Language = v
+	}
+	if v, ok := m["version"].(string); ok {
+		jr.Version = v
+	}
+	if v, ok := m["stdin"].(string); ok {
+		jr.Stdin = v
+	}
+	if v, ok := m["args"].([]interface{}); ok {
+		args := make([]string, 0, len(v))
+		for _, a := range v {
+			if s, ok := a.(string); ok {
+				args = append(args, s)
+			}
+		}
+		jr.Args = args
+	}
+
+	// files: accept multiple slice element types
+	if rawFiles, ok := m["files"]; ok {
+		switch vv := rawFiles.(type) {
+		case []interface{}:
+			files := make([]types.CodeFile, 0, len(vv))
+			for _, f := range vv {
+				if fm, ok := f.(map[string]interface{}); ok {
+					cf := types.CodeFile{}
+					if s, ok := fm["name"].(string); ok {
+						cf.Name = s
+					}
+					if s, ok := fm["content"].(string); ok {
+						cf.Content = s
+					} else {
+						return nil, fmt.Errorf("files[].content must be string")
+					}
+					if s, ok := fm["encoding"].(string); ok {
+						cf.Encoding = s
+					}
+					files = append(files, cf)
+				}
+			}
+			jr.Files = files
+		case []map[string]interface{}:
+			files := make([]types.CodeFile, 0, len(vv))
+			for _, fm := range vv {
+				cf := types.CodeFile{}
+				if s, ok := fm["name"].(string); ok {
+					cf.Name = s
+				}
+				if s, ok := fm["content"].(string); ok {
+					cf.Content = s
+				} else {
+					return nil, fmt.Errorf("files[].content must be string")
+				}
+				if s, ok := fm["encoding"].(string); ok {
+					cf.Encoding = s
+				}
+				files = append(files, cf)
+			}
+			jr.Files = files
+		case []map[string]string:
+			files := make([]types.CodeFile, 0, len(vv))
+			for _, fm := range vv {
+				cf := types.CodeFile{}
+				if s, ok := fm["name"]; ok {
+					cf.Name = s
+				}
+				if s, ok := fm["content"]; ok {
+					cf.Content = s
+				} else {
+					return nil, fmt.Errorf("files[].content must be string")
+				}
+				if s, ok := fm["encoding"]; ok {
+					cf.Encoding = s
+				}
+				files = append(files, cf)
+			}
+			jr.Files = files
+		}
+	}
+
+	// numeric helpers
+	toIntPtr := func(key string) *int {
+		if val, ok := m[key]; ok {
+			switch x := val.(type) {
+			case float64:
+				xi := int(x)
+				return &xi
+			case int:
+				xi := x
+				return &xi
+			}
+		}
+		return nil
+	}
+	toInt64Ptr := func(key string) *int64 {
+		if val, ok := m[key]; ok {
+			switch x := val.(type) {
+			case float64:
+				xi := int64(x)
+				return &xi
+			case int:
+				xi := int64(x)
+				return &xi
+			}
+		}
+		return nil
+	}
+
+	jr.CompileTimeout = toIntPtr("compile_timeout")
+	jr.RunTimeout = toIntPtr("run_timeout")
+	jr.CompileCPUTime = toIntPtr("compile_cpu_time")
+	jr.RunCPUTime = toIntPtr("run_cpu_time")
+	jr.CompileMemoryLimit = toInt64Ptr("compile_memory_limit")
+	jr.RunMemoryLimit = toInt64Ptr("run_memory_limit")
+
+	return jr, nil
 }
 
 // handleData handles stdin data
@@ -239,11 +433,12 @@ func (wsConn *WebSocketConnection) handleJobEvent(event types.StreamEvent) {
 			Language: wsConn.job.Runtime.Language,
 			Version:  wsConn.job.Runtime.Version.String(),
 		})
-	case "stage":
-		wsConn.sendMessage(types.WebSocketMessage{
-			Type:  "stage",
-			Stage: event.Stage,
-		})
+	case "stage_start":
+		wsConn.sendMessage(types.WebSocketMessage{Type: "stage_start", Stage: event.Stage})
+	case "stage_end":
+		// include exit code (always present as pointer)
+		code := event.Code
+		wsConn.sendMessage(types.WebSocketMessage{Type: "stage_end", Stage: event.Stage, Code: &code})
 	case "data":
 		wsConn.sendMessage(types.WebSocketMessage{
 			Type:   "data",
@@ -321,18 +516,27 @@ func (wsConn *WebSocketConnection) eventSender() {
 
 // sendMessage sends a message to the client
 func (wsConn *WebSocketConnection) sendMessage(msg types.WebSocketMessage) {
+	// Ensure we don't send on a closed channel; guard with mutex to avoid race with close()
+	wsConn.mutex.Lock()
+	if wsConn.closed {
+		wsConn.mutex.Unlock()
+		return
+	}
 	select {
 	case wsConn.eventBus <- msg:
+		// sent
 	default:
 		wsConn.logger.Warn("Event bus full, dropping message")
 	}
+	wsConn.mutex.Unlock()
 }
 
 // sendError sends an error message
 func (wsConn *WebSocketConnection) sendError(message string) error {
 	wsConn.sendMessage(types.WebSocketMessage{
-		Type:  "error",
-		Error: message,
+		Type:    "error",
+		Message: message,
+		Error:   message, // keep for backward-compat with existing tests/clients
 	})
 	return nil
 }

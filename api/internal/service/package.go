@@ -191,6 +191,11 @@ func (ps *PackageService) InstallPackage(pkg *types.Package) error {
 	}
 
 	ps.logger.Infof("Successfully installed %s-%s", pkg.Language, pkg.Version.String())
+
+	// Refresh runtime list to reflect the newly installed package
+	if err := ps.runtimeManager.LoadPackages(); err != nil {
+		ps.logger.WithError(err).Warn("Failed to refresh runtimes after install")
+	}
 	return nil
 }
 
@@ -210,6 +215,11 @@ func (ps *PackageService) UninstallPackage(pkg *types.Package) error {
 	}
 
 	ps.logger.Infof("Successfully uninstalled %s-%s", pkg.Language, pkg.Version.String())
+
+	// Refresh runtime list to reflect the uninstalled package
+	if err := ps.runtimeManager.LoadPackages(); err != nil {
+		ps.logger.WithError(err).Warn("Failed to refresh runtimes after uninstall")
+	}
 	return nil
 }
 

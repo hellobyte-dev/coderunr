@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,6 +79,12 @@ type Job struct {
 	StdinChannel chan string
 	runningCmd   *exec.Cmd
 	cmdMutex     sync.RWMutex
+
+	// Streaming output limit (combined stdout+stderr)
+	outputBudget int
+	outputSent   int
+	outputMu     sync.Mutex
+	killOnce     sync.Once
 }
 
 // NewJob creates a new job from a request
@@ -111,9 +118,7 @@ func (m *Manager) NewJob(runtime *types.Runtime, request *types.JobRequest) *Job
 
 	// Process stdin
 	stdin := request.Stdin
-	if stdin != "" && !strings.HasSuffix(stdin, "\n") {
-		stdin += "\n"
-	}
+	// Preserve stdin exactly as provided (no implicit newline)
 
 	// Apply request-specific limits or use runtime defaults
 	timeouts := types.Timeouts{
@@ -168,6 +173,9 @@ func (m *Manager) NewJob(runtime *types.Runtime, request *types.JobRequest) *Job
 		// Initialize streaming channels
 		EventChannel: make(chan types.StreamEvent, 100),
 		StdinChannel: make(chan string, 10),
+
+		// Initialize output budget (<=0 means unlimited)
+		outputBudget: runtime.OutputMaxSize,
 	}
 }
 
@@ -193,6 +201,27 @@ func (j *Job) Execute(ctx context.Context) (*types.ExecutionResult, error) {
 		Language: j.Runtime.Language,
 		Version:  j.Runtime.Version.String(),
 	}
+	// Fill in effective limits (optional)
+	result.Limits = &struct {
+		Timeouts struct {
+			Compile int `json:"compile"`
+			Run     int `json:"run"`
+		} `json:"timeouts"`
+		CPUTimes struct {
+			Compile int `json:"compile"`
+			Run     int `json:"run"`
+		} `json:"cpu_times"`
+		MemoryLimits struct {
+			Compile int64 `json:"compile"`
+			Run     int64 `json:"run"`
+		} `json:"memory_limits"`
+	}{}
+	result.Limits.Timeouts.Compile = int(j.Timeouts.Compile.Milliseconds())
+	result.Limits.Timeouts.Run = int(j.Timeouts.Run.Milliseconds())
+	result.Limits.CPUTimes.Compile = int(j.CPUTimes.Compile.Milliseconds())
+	result.Limits.CPUTimes.Run = int(j.CPUTimes.Run.Milliseconds())
+	result.Limits.MemoryLimits.Compile = j.MemoryLimits.Compile
+	result.Limits.MemoryLimits.Run = j.MemoryLimits.Run
 
 	// Compile stage (if needed)
 	if j.Runtime.Compiled {
@@ -205,7 +234,7 @@ func (j *Job) Execute(ctx context.Context) (*types.ExecutionResult, error) {
 		result.Compile = compileResult
 
 		// If compilation failed, don't run
-		if compileResult.Code != 0 {
+		if compileResult.Signal != "" || (compileResult.Code != nil && *compileResult.Code != 0) {
 			return result, nil
 		}
 
@@ -260,13 +289,12 @@ func (j *Job) ExecuteStream(ctx context.Context) error {
 		return fmt.Errorf("failed to prime job: %w", err)
 	}
 
-	// Send runtime information
-	j.sendEvent(types.StreamEvent{Type: "runtime"})
+	// Runtime information is sent by the websocket handler upon init_ack
 
 	// Compile stage (if needed)
 	if j.Runtime.Compiled {
 		j.logger.Debug("Running compile stage")
-		j.sendEvent(types.StreamEvent{Type: "stage", Stage: "compile"})
+		j.sendEvent(types.StreamEvent{Type: "stage_start", Stage: "compile"})
 
 		compileResult, err := j.safeCallStream(ctx, box, "compile", j.getCodeFileNames(),
 			j.Timeouts.Compile, j.CPUTimes.Compile, j.MemoryLimits.Compile)
@@ -275,11 +303,16 @@ func (j *Job) ExecuteStream(ctx context.Context) error {
 			return fmt.Errorf("compile stage failed: %w", err)
 		}
 
-		// Send exit information for compile stage
-		j.sendEvent(types.StreamEvent{Type: "exit", Stage: "compile", Code: compileResult.Code})
+		// Send stage end after compile completes
+		// Send stage end (use 0 when code is nil)
+		compCode := 0
+		if compileResult.Code != nil {
+			compCode = *compileResult.Code
+		}
+		j.sendEvent(types.StreamEvent{Type: "stage_end", Stage: "compile", Code: compCode})
 
 		// If compilation failed, don't run
-		if compileResult.Code != 0 {
+		if compileResult.Signal != "" || (compileResult.Code != nil && *compileResult.Code != 0) {
 			return nil
 		}
 
@@ -301,7 +334,7 @@ func (j *Job) ExecuteStream(ctx context.Context) error {
 
 	// Run stage
 	j.logger.Debug("Running execution stage")
-	j.sendEvent(types.StreamEvent{Type: "stage", Stage: "run"})
+	j.sendEvent(types.StreamEvent{Type: "stage_start", Stage: "run"})
 
 	args := []string{j.Files[0].Name}
 	args = append(args, j.Args...)
@@ -313,8 +346,12 @@ func (j *Job) ExecuteStream(ctx context.Context) error {
 		return fmt.Errorf("run stage failed: %w", err)
 	}
 
-	// Send exit information for run stage
-	j.sendEvent(types.StreamEvent{Type: "exit", Stage: "run", Code: runResult.Code})
+	// Send stage end for run stage
+	runCode := 0
+	if runResult.Code != nil {
+		runCode = *runResult.Code
+	}
+	j.sendEvent(types.StreamEvent{Type: "stage_end", Stage: "run", Code: runCode})
 
 	j.State = types.JobStateExecuted
 	return nil
@@ -490,8 +527,17 @@ func (j *Job) safeCall(ctx context.Context, box *types.IsolateBox, stage string,
 	isolateArgs = append(isolateArgs, fmt.Sprintf("--processes=%d", j.Runtime.MaxProcessCount))
 	isolateArgs = append(isolateArgs, fmt.Sprintf("--open-files=%d", j.Runtime.MaxOpenFiles))
 	isolateArgs = append(isolateArgs, fmt.Sprintf("--fsize=%d", j.Runtime.MaxFileSize/1000))
-	isolateArgs = append(isolateArgs, fmt.Sprintf("--wall-time=%d", int(timeout.Seconds())))
-	isolateArgs = append(isolateArgs, fmt.Sprintf("--time=%d", int(cpuTime.Seconds())))
+	// Round sub-second timeouts up to 1s so isolate enforces them
+	wt := int(math.Ceil(timeout.Seconds()))
+	ct := int(math.Ceil(cpuTime.Seconds()))
+	if timeout > 0 && wt == 0 {
+		wt = 1
+	}
+	if cpuTime > 0 && ct == 0 {
+		ct = 1
+	}
+	isolateArgs = append(isolateArgs, fmt.Sprintf("--wall-time=%d", wt))
+	isolateArgs = append(isolateArgs, fmt.Sprintf("--time=%d", ct))
 	isolateArgs = append(isolateArgs, "--extra-time=0")
 
 	// Add memory limit if specified
@@ -556,18 +602,19 @@ func (j *Job) safeCall(ctx context.Context, box *types.IsolateBox, stage string,
 		j.logger.WithError(parseErr).Warn("Failed to parse metadata")
 	}
 
+	exitCode := cmd.ProcessState.ExitCode()
 	result := &types.StageResult{
 		Stdout: stdoutBuf.String(),
 		Stderr: stderrBuf.String(),
 		Output: outputBuf.String(),
-		Code:   cmd.ProcessState.ExitCode(),
+		Code:   &exitCode,
 	}
 
 	// Apply metadata if available
 	if metadata != nil {
 		result.Memory = metadata.Memory
-		result.CPUTime = metadata.CPUTime
-		result.WallTime = metadata.WallTime
+		result.CPUTime = metadata.CPUTime.Milliseconds()
+		result.WallTime = metadata.WallTime.Milliseconds()
 		result.Status = metadata.Status
 		result.Message = metadata.Message
 		result.Signal = metadata.Signal
@@ -576,6 +623,11 @@ func (j *Job) safeCall(ctx context.Context, box *types.IsolateBox, stage string,
 	// Override signal for certain statuses
 	if result.Status == "TO" || result.Status == "OL" || result.Status == "EL" {
 		result.Signal = "SIGKILL"
+	}
+
+	// Piston semantics: if a signal is present, code must be null
+	if result.Signal != "" {
+		result.Code = nil
 	}
 
 	// Handle command execution error
@@ -620,8 +672,17 @@ func (j *Job) safeCallStream(ctx context.Context, box *types.IsolateBox, stage s
 	isolateArgs = append(isolateArgs, fmt.Sprintf("--processes=%d", j.Runtime.MaxProcessCount))
 	isolateArgs = append(isolateArgs, fmt.Sprintf("--open-files=%d", j.Runtime.MaxOpenFiles))
 	isolateArgs = append(isolateArgs, fmt.Sprintf("--fsize=%d", j.Runtime.MaxFileSize/1000))
-	isolateArgs = append(isolateArgs, fmt.Sprintf("--wall-time=%d", int(timeout.Seconds())))
-	isolateArgs = append(isolateArgs, fmt.Sprintf("--time=%d", int(cpuTime.Seconds())))
+	// Round sub-second timeouts up to 1s so isolate enforces them
+	wt := int(math.Ceil(timeout.Seconds()))
+	ct := int(math.Ceil(cpuTime.Seconds()))
+	if timeout > 0 && wt == 0 {
+		wt = 1
+	}
+	if cpuTime > 0 && ct == 0 {
+		ct = 1
+	}
+	isolateArgs = append(isolateArgs, fmt.Sprintf("--wall-time=%d", wt))
+	isolateArgs = append(isolateArgs, fmt.Sprintf("--time=%d", ct))
 	isolateArgs = append(isolateArgs, "--extra-time=0")
 
 	// Add memory limit if specified
@@ -710,15 +771,16 @@ func (j *Job) safeCallStream(ctx context.Context, box *types.IsolateBox, stage s
 		j.logger.WithError(parseErr).Warn("Failed to parse metadata")
 	}
 
+	exitCode := cmd.ProcessState.ExitCode()
 	result := &types.StageResult{
-		Code: cmd.ProcessState.ExitCode(),
+		Code: &exitCode,
 	}
 
 	// Apply metadata if available
 	if metadata != nil {
 		result.Memory = metadata.Memory
-		result.CPUTime = metadata.CPUTime
-		result.WallTime = metadata.WallTime
+		result.CPUTime = metadata.CPUTime.Milliseconds()
+		result.WallTime = metadata.WallTime.Milliseconds()
 		result.Status = metadata.Status
 		result.Message = metadata.Message
 		result.Signal = metadata.Signal
@@ -727,6 +789,11 @@ func (j *Job) safeCallStream(ctx context.Context, box *types.IsolateBox, stage s
 	// Override signal for certain statuses
 	if result.Status == "TO" || result.Status == "OL" || result.Status == "EL" {
 		result.Signal = "SIGKILL"
+	}
+
+	// Piston semantics: if a signal is present, code must be null
+	if result.Signal != "" {
+		result.Code = nil
 	}
 
 	// Handle command execution error
@@ -744,13 +811,50 @@ func (j *Job) safeCallStream(ctx context.Context, box *types.IsolateBox, stage s
 func (j *Job) streamOutput(reader io.Reader, streamType string) {
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
-		line := scanner.Text()
-		j.sendEvent(types.StreamEvent{
-			Type:   "data",
-			Stream: streamType,
-			Data:   line,
-		})
+		line := scanner.Text() // without trailing newline
+
+		// Enforce combined stdout/stderr budget if enabled
+		if j.outputBudget > 0 {
+			j.outputMu.Lock()
+			remaining := j.outputBudget - j.outputSent
+			if remaining <= 0 {
+				j.outputMu.Unlock()
+				j.triggerOutputLimitExceeded()
+				return
+			}
+
+			// Trim line if it exceeds remaining budget
+			if len(line) > remaining {
+				line = line[:remaining]
+				j.outputSent += len(line)
+				j.outputMu.Unlock()
+
+				// Send truncated data then terminate
+				j.sendEvent(types.StreamEvent{Type: "data", Stream: streamType, Data: line})
+				j.triggerOutputLimitExceeded()
+				return
+			}
+
+			// Send and account
+			j.outputSent += len(line)
+			j.outputMu.Unlock()
+		}
+
+		// Budget disabled or accounted: send normally
+		j.sendEvent(types.StreamEvent{Type: "data", Stream: streamType, Data: line})
 	}
+}
+
+// triggerOutputLimitExceeded sends an error once and terminates the running process
+func (j *Job) triggerOutputLimitExceeded() {
+	j.killOnce.Do(func() {
+		j.sendEvent(types.StreamEvent{Type: "error", Error: fmt.Errorf("output limit exceeded")})
+		j.cmdMutex.RLock()
+		defer j.cmdMutex.RUnlock()
+		if j.runningCmd != nil && j.runningCmd.Process != nil {
+			_ = j.runningCmd.Process.Kill()
+		}
+	})
 }
 
 // readWithLimit reads from a reader with size limit

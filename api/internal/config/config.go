@@ -32,6 +32,9 @@ type Config struct {
 	MaxFileSize     int64 `mapstructure:"max_file_size"`
 	OutputMaxSize   int   `mapstructure:"output_max_size"`
 
+	// HTTP request limits
+	RequestBodyLimit int64 `mapstructure:"request_body_limit"`
+
 	// Security settings
 	DisableNetworking bool `mapstructure:"disable_networking"`
 	RunnerUIDMin      int  `mapstructure:"runner_uid_min"`
@@ -63,6 +66,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("max_open_files", 2048)
 	viper.SetDefault("max_file_size", 10000000) // 10MB
 	viper.SetDefault("output_max_size", 1024)
+	viper.SetDefault("request_body_limit", 1048576) // 1MB default for JSON POST/DELETE
 	viper.SetDefault("disable_networking", true)
 	viper.SetDefault("runner_uid_min", 1001)
 	viper.SetDefault("runner_uid_max", 1500)

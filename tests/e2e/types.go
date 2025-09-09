@@ -48,4 +48,6 @@ type RunResult struct {
 	Memory   int64  `json:"memory"`
 	CPUTime  int64  `json:"cpu_time"`
 	WallTime int64  `json:"wall_time"`
+	Signal   string `json:"signal,omitempty"`
+	Status   string `json:"status,omitempty"`
 }

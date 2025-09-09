@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
@@ -84,13 +85,52 @@ func JSON(next http.Handler) http.Handler {
 		}
 
 		contentType := r.Header.Get("Content-Type")
-		if contentType == "" || contentType != "application/json" {
-			http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		if contentType == "" || !strings.HasPrefix(strings.ToLower(contentType), "application/json") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			_, _ = w.Write([]byte(`{"message":"Content-Type must be application/json"}`))
 			return
 		}
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// BodyLimit limits the request body size for JSON-modifying verbs (POST/DELETE)
+func BodyLimit(limit int64) func(next http.Handler) http.Handler {
+	// sanitize: non-positive disables limiting
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if limit > 0 && (r.Method == http.MethodPost || r.Method == http.MethodDelete) {
+				if cl := r.Header.Get("Content-Length"); cl != "" {
+					// parse content-length safely
+					var n int64
+					for i := 0; i < len(cl); i++ {
+						c := cl[i]
+						if c < '0' || c > '9' {
+							n = -1
+							break
+						}
+					}
+					if n != -1 {
+						// standard parse since digits-only
+						var val int64
+						for i := 0; i < len(cl); i++ {
+							val = val*10 + int64(cl[i]-'0')
+						}
+						if val > limit {
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(http.StatusRequestEntityTooLarge)
+							_, _ = w.Write([]byte(`{"message":"request body too large"}`))
+							return
+						}
+					}
+				}
+				r.Body = http.MaxBytesReader(w, r.Body, limit)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // Recovery recovers from panics and logs them

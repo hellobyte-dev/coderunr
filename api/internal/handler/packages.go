@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -39,7 +40,9 @@ func (ph *PackageHandler) GetPackages(w http.ResponseWriter, r *http.Request) {
 	packages, err := ph.packageService.GetPackageList()
 	if err != nil {
 		ph.logger.Errorf("Failed to get package list: %v", err)
-		http.Error(w, "Failed to get package list", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(types.ErrorResponse{Message: "Failed to get package list"})
 		return
 	}
 
@@ -56,7 +59,9 @@ func (ph *PackageHandler) GetPackages(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		ph.logger.Errorf("Failed to encode response: %v", err)
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(types.ErrorResponse{Message: "Failed to encode response"})
 		return
 	}
 }
@@ -70,14 +75,27 @@ func (ph *PackageHandler) InstallPackage(w http.ResponseWriter, r *http.Request)
 		Version  string `json:"version"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_ = json.NewEncoder(w).Encode(types.ErrorResponse{Message: "Request body too large"})
+			return
+		}
 		ph.logger.Errorf("Invalid request body: %v", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(types.ErrorResponse{Message: "Invalid request body"})
 		return
 	}
 
 	if req.Language == "" || req.Version == "" {
-		http.Error(w, "Language and version are required", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(types.ErrorResponse{Message: "Language and version are required"})
 		return
 	}
 
@@ -96,9 +114,7 @@ func (ph *PackageHandler) InstallPackage(w http.ResponseWriter, r *http.Request)
 		ph.logger.Errorf("Error while installing package %s-%s: %v", pkg.Language, pkg.Version.String(), err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{
-			"message": err.Error(),
-		})
+		_ = json.NewEncoder(w).Encode(types.ErrorResponse{Message: err.Error()})
 		return
 	}
 
@@ -108,9 +124,12 @@ func (ph *PackageHandler) InstallPackage(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		ph.logger.Errorf("Failed to encode response: %v", err)
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(types.ErrorResponse{Message: "Failed to encode response"})
 		return
 	}
 }
@@ -124,14 +143,27 @@ func (ph *PackageHandler) UninstallPackage(w http.ResponseWriter, r *http.Reques
 		Version  string `json:"version"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_ = json.NewEncoder(w).Encode(types.ErrorResponse{Message: "Request body too large"})
+			return
+		}
 		ph.logger.Errorf("Invalid request body: %v", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(types.ErrorResponse{Message: "Invalid request body"})
 		return
 	}
 
 	if req.Language == "" || req.Version == "" {
-		http.Error(w, "Language and version are required", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(types.ErrorResponse{Message: "Language and version are required"})
 		return
 	}
 
@@ -150,21 +182,10 @@ func (ph *PackageHandler) UninstallPackage(w http.ResponseWriter, r *http.Reques
 		ph.logger.Errorf("Error while uninstalling package %s-%s: %v", pkg.Language, pkg.Version.String(), err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{
-			"message": err.Error(),
-		})
+		_ = json.NewEncoder(w).Encode(types.ErrorResponse{Message: err.Error()})
 		return
 	}
 
-	response := map[string]string{
-		"language": pkg.Language,
-		"version":  pkg.Version.String(),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		ph.logger.Errorf("Failed to encode response: %v", err)
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-		return
-	}
+	// No Content as per alignment
+	w.WriteHeader(http.StatusNoContent)
 }

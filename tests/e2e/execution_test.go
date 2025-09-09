@@ -90,6 +90,8 @@ func TestCodeExecution(t *testing.T) {
 	}
 }
 
+// stdin 相关测试放在 execute_api_test.go 使用统一的请求封装
+
 func TestCodeExecutionWithMultipleFiles(t *testing.T) {
 	t.Run("Go with multiple files", func(t *testing.T) {
 		t.Skip("Go multi-file projects are not supported due to package import limitations")

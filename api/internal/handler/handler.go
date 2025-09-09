@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -43,7 +44,14 @@ func (h *Handler) GetVersion(w http.ResponseWriter, r *http.Request) {
 // ExecuteCode executes code synchronously
 func (h *Handler) ExecuteCode(w http.ResponseWriter, r *http.Request) {
 	var request types.JobRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&request); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			h.sendError(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		h.sendError(w, "Invalid JSON request", http.StatusBadRequest)
 		return
 	}
@@ -102,6 +110,9 @@ func (h *Handler) GetRuntimes(w http.ResponseWriter, r *http.Request) {
 			Version:  rt.Version.String(),
 			Aliases:  rt.Aliases,
 			Runtime:  runtimeName,
+			Platform: rt.Platform,
+			OS:       rt.OS,
+			Arch:     rt.Arch,
 		}
 	}
 

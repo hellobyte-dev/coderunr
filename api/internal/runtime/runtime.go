@@ -37,6 +37,11 @@ func NewManager(cfg *config.Config) *Manager {
 func (m *Manager) LoadPackages() error {
 	packagesDir := filepath.Join(m.config.DataDirectory, "packages")
 
+	// Reset current runtimes before reloading to avoid duplicates and drop removed packages
+	mutex.Lock()
+	runtimes = []types.Runtime{}
+	mutex.Unlock()
+
 	if _, err := os.Stat(packagesDir); os.IsNotExist(err) {
 		logger.Warn("Packages directory does not exist, creating it")
 		if err := os.MkdirAll(packagesDir, 0755); err != nil {
@@ -145,6 +150,9 @@ func (m *Manager) loadPackage(packageDir string) error {
 				Language:        provide.Language,
 				Version:         version,
 				Aliases:         provide.Aliases,
+				Platform:        info.BuildPlatform,
+				OS:              parseOS(info.BuildPlatform),
+				Arch:            parseArch(info.BuildPlatform),
 				PkgDir:          packageDir,
 				Runtime:         info.Language,
 				Timeouts:        m.computeTimeouts(provide.Language, provide.LimitOverrides),
@@ -164,6 +172,9 @@ func (m *Manager) loadPackage(packageDir string) error {
 			Language:        info.Language,
 			Version:         version,
 			Aliases:         info.Aliases,
+			Platform:        info.BuildPlatform,
+			OS:              parseOS(info.BuildPlatform),
+			Arch:            parseArch(info.BuildPlatform),
 			PkgDir:          packageDir,
 			Runtime:         info.Language,
 			Timeouts:        m.computeTimeouts(info.Language, info.LimitOverrides),
@@ -398,4 +409,22 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// parseOS extracts OS from build_platform in the form os/arch, returns empty if unknown
+func parseOS(platform string) string {
+	parts := strings.Split(platform, "/")
+	if len(parts) >= 1 {
+		return parts[0]
+	}
+	return ""
+}
+
+// parseArch extracts Arch from build_platform in the form os/arch, returns empty if unknown
+func parseArch(platform string) string {
+	parts := strings.Split(platform, "/")
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
 }

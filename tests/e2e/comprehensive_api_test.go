@@ -24,14 +24,14 @@ func TestPackageManagement(t *testing.T) {
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
-		// When already installed, the API returns 500 with specific error message
+		// When already installed, the API may return 500 with specific error message
 		if resp.StatusCode == http.StatusInternalServerError {
 			var errorResp map[string]string
 			json.NewDecoder(resp.Body).Decode(&errorResp)
 			assert.Contains(t, errorResp["message"], "already installed")
 		} else {
-			// If not already installed, should succeed
-			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			// If not already installed, should succeed with 201 Created
+			assert.Equal(t, http.StatusCreated, resp.StatusCode)
 		}
 	})
 
