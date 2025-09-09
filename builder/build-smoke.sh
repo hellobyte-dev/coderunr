@@ -40,19 +40,35 @@ echo "1️⃣  Starting container..."
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" \
   --privileged \
+  -e CODERUNR_LOG_LEVEL=debug \
+  -e SKIP_CHOWN_PACKAGES=1 \
   -p ${PORT}:2000 \
   "$IMAGE_TAG" >/dev/null
 
 echo -n "⏳ Waiting for API ..."
-for i in {1..90}; do
-  if curl -fsS "http://127.0.0.1:${PORT}/api/v2/runtimes" >/dev/null; then
+for i in {1..120}; do
+  if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 \
+     || curl -fsS "http://127.0.0.1:${PORT}/api/v2/runtimes" >/dev/null 2>&1 \
+     || docker exec "$CONTAINER" sh -lc 'curl -fsS http://localhost:2000/health >/dev/null 2>&1' >/dev/null 2>&1; then
     echo " ready"
     break
   fi
   echo -n "."
+  # Show recent logs every ~15s to aid diagnosis while waiting
+  if (( i % 15 == 0 )); then
+    echo -e "\n--- recent logs ---"
+    docker logs --tail=50 "$CONTAINER" || true
+    echo "Health: $(docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "$CONTAINER" 2>/dev/null || true)"
+    echo -n "⏳ Waiting for API ..."
+  fi
   sleep 1
-  if [[ $i -eq 90 ]]; then
-    echo; echo "❌ API not ready in time" >&2; exit 1
+  if [[ $i -eq 120 ]]; then
+    echo; echo "❌ API not ready in time" >&2
+    echo "Container logs:" >&2
+    docker logs "$CONTAINER" || true
+    echo "Inspect health:" >&2
+    docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "$CONTAINER" || true
+    exit 1
   fi
 done
 

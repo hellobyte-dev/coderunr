@@ -31,8 +31,22 @@ if [ "$(id -u)" = "0" ]; then
     echo '+cpuset +memory' > cgroup.subtree_control
     echo "Cgroup initialized successfully"
     
-    # Change ownership of data directory
+  # Change ownership of data directory
+  # To avoid slow startup on large prebaked packages, allow skipping package chown
+  # Set SKIP_CHOWN_PACKAGES=1 to skip /coderunr/packages, or leave empty to chown all
+  if [ "${SKIP_CHOWN_PACKAGES:-}" = "1" ]; then
+    echo "Skipping chown on /coderunr/packages (SKIP_CHOWN_PACKAGES=1)"
+    # Ensure other subdirs are owned correctly
+    for d in /coderunr /coderunr/*; do
+      [ "$d" = "/coderunr/packages" ] && continue
+      [ -e "$d" ] || continue
+      chown -R coderunr:coderunr "$d" || true
+    done
+    # Fix top-level dir ownership (non-recursive) as a safety
+    chown coderunr:coderunr /coderunr || true
+  else
     chown -R coderunr:coderunr /coderunr
+  fi
     
     # Switch to coderunr user and exec server
     exec su -- coderunr -c 'ulimit -n 65536 && server'
