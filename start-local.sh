@@ -31,9 +31,9 @@ cd repo
 ./mkindex.sh || echo "⚠️  Index generation failed"
 cd ..
 
-# Start services with Docker Compose
-echo "🐳 Starting services..."
-docker compose up -d
+# Start services with Docker Compose (force rebuild images)
+echo "🐳 Starting services (rebuilding images)..."
+docker compose up -d --build
 
 echo "✅ CodeRunr services started!"
 echo ""

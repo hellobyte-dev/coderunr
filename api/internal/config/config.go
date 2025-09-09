@@ -72,7 +72,10 @@ func Load() (*Config, error) {
 	viper.SetDefault("runner_uid_max", 1500)
 	viper.SetDefault("runner_gid_min", 1001)
 	viper.SetDefault("runner_gid_max", 1500)
-	viper.SetDefault("repo_url", "https://github.com/engineer-man/piston/releases/download/pkgs/index")
+	// Default package repository index (direct asset URL). If you want to refer to the tag page,
+	// use https://github.com/hellobyte-dev/coderunr/releases/tag/packages, but the service needs
+	// the raw index file, which is available at the download URL below.
+	viper.SetDefault("repo_url", "https://github.com/hellobyte-dev/coderunr/releases/download/packages/index")
 	viper.SetDefault("limit_overrides", map[string]map[string]interface{}{})
 
 	// Set environment variable prefix

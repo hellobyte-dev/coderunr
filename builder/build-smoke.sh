@@ -44,14 +44,14 @@ docker run -d --name "$CONTAINER" \
   "$IMAGE_TAG" >/dev/null
 
 echo -n "⏳ Waiting for API ..."
-for i in {1..60}; do
-  if curl -fsS "http://127.0.0.1:${PORT}/api/v2/packages" >/dev/null; then
+for i in {1..90}; do
+  if curl -fsS "http://127.0.0.1:${PORT}/api/v2/runtimes" >/dev/null; then
     echo " ready"
     break
   fi
   echo -n "."
   sleep 1
-  if [[ $i -eq 60 ]]; then
+  if [[ $i -eq 90 ]]; then
     echo; echo "❌ API not ready in time" >&2; exit 1
   fi
 done
