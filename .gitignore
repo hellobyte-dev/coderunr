@@ -66,3 +66,6 @@ tmp/
 /coderunr-*
 /server
 api/server
+
+# CLI build artifact
+cli/coderunr-cli

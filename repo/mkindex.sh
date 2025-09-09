@@ -1,4 +1,4 @@
-BASEURL=http://coderunr-repo:8000/
+BASEURL=${BASEURL:-http://coderunr-repo:8000/}
 
 i=0
 
