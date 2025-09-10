@@ -31,8 +31,34 @@ if [ "$(id -u)" = "0" ]; then
     echo '+cpuset +memory' > cgroup.subtree_control
     echo "Cgroup initialized successfully"
     
-    # Change ownership of data directory
-    chown -R coderunr:coderunr /coderunr
+    # Smart ownership handling for performance optimization
+    if [ "${SKIP_CHOWN_PACKAGES:-false}" = "true" ]; then
+        echo "Skipping package ownership change (SKIP_CHOWN_PACKAGES=true)"
+        # Only ensure base directory ownership
+        chown coderunr:coderunr /coderunr
+    elif [ -d /coderunr/packages ]; then
+        # Check if packages directory needs ownership fix
+        PACKAGES_OWNER=$(stat -c '%U' /coderunr/packages 2>/dev/null || echo "unknown")
+        if [ "$PACKAGES_OWNER" != "coderunr" ]; then
+            if [ ! -f /coderunr/.ownership_fixed ]; then
+                echo "Fixing ownership of packages directory (owner: $PACKAGES_OWNER -> coderunr)"
+                echo "This may take a moment for pre-built images..."
+                chown -R coderunr:coderunr /coderunr
+                touch /coderunr/.ownership_fixed
+                echo "Ownership fix completed"
+            else
+                echo "Packages ownership already fixed (found .ownership_fixed marker)"
+            fi
+        else
+            echo "Packages directory already has correct ownership (coderunr)"
+            # Ensure base directory is correct
+            chown coderunr:coderunr /coderunr
+        fi
+    else
+        # For empty data directories, quick ownership fix
+        echo "Setting up empty data directory ownership"
+        chown -R coderunr:coderunr /coderunr
+    fi
     
     # Switch to coderunr user and exec server
     exec su -- coderunr -c 'ulimit -n 65536 && server'

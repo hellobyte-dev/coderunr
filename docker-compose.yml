@@ -13,6 +13,7 @@ services:
       - CODERUNR_LOG_LEVEL=debug
       - CODERUNR_DATA_DIRECTORY=/coderunr
       - CODERUNR_REPO_URL=http://coderunr-repo:8000/index
+      - SKIP_CHOWN_PACKAGES=false  # Set to true for faster startup with pre-built images
     volumes:
       - coderunr-data:/coderunr
       - /var/run/docker.sock:/var/run/docker.sock

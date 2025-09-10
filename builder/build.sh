@@ -27,11 +27,23 @@ fetch_packages(){
   local port=$((5535 + RANDOM % 60000))
   rm -rf build
   mkdir build
-  # Start a coderunr API container
+  
+  # Check if local repo is running
+  if ! curl -fs http://localhost:8000 >/dev/null 2>&1; then
+    echo "Local repo not running on port 8000. Starting it..."
+    # Start local repo if not running
+    (cd .. && docker compose up coderunr-repo -d) || help_msg "failed to start local repo"
+    # Wait a moment for repo to be ready
+    sleep 3
+  fi
+  
+  # Start a coderunr API container with local repo configuration
   docker run \
     --privileged \
     -v "$PWD/build":'/coderunr/packages' \
-  -e CODERUNR_DISABLE_NETWORKING=false \
+    -e CODERUNR_DISABLE_NETWORKING=false \
+    -e CODERUNR_REPO_URL=http://coderunr-repo:8000/index \
+    --network coderunr_coderunr-network \
     -dit \
     -p $port:2000 \
     --name builder_coderunr_instance \
@@ -42,6 +54,16 @@ fetch_packages(){
     command -v go >/dev/null 2>&1 || help_msg "go is required"
     (cd "$CLI_DIR" && go build -o coderunr-cli .) || help_msg "failed to build coderunr CLI"
   fi
+
+  # Wait for API to be ready
+  echo "Waiting for API to be ready..."
+  for i in {1..30}; do
+    if curl -fs "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+      echo "API is ready"
+      break
+    fi
+    sleep 1
+  done
 
   # Evaluate the specfile (no fallback, aligned with piston)
   "$CLI_BIN" -u "http://127.0.0.1:$port" ppman spec "$specfile" || help_msg "ppman spec failed"
