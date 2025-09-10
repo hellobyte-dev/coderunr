@@ -148,7 +148,12 @@ func NewPackageSpecCommand() *cobra.Command {
 }
 
 func installLanguageVersion(baseURL, language, version string) error {
-	client := &http.Client{Timeout: 9 * time.Minute} // 略小于服务端HTTP路由超时
+	client := &http.Client{
+		Timeout: 9 * time.Minute, // 略小于服务端HTTP路由超时
+		Transport: &http.Transport{
+			DisableKeepAlives: true, // 禁用连接重用，避免EOF问题
+		},
+	}
 	reqObj := map[string]string{
 		"language": language,
 		"version":  version,
@@ -162,10 +167,16 @@ func installLanguageVersion(baseURL, language, version string) error {
 		return err
 	}
 	defer resp.Body.Close()
+
+	// Always read the response body to ensure complete transfer
+	b, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return fmt.Errorf("failed to read response body: %w", readErr)
+	}
+
 	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
 		return nil
 	}
-	b, _ := io.ReadAll(resp.Body)
 	return fmt.Errorf("status %d: %s", resp.StatusCode, string(b))
 }
 
