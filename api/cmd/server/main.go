@@ -81,7 +81,7 @@ func main() {
 			})
 			// Long timeout group (packages install/uninstall/list)
 			r.Group(func(r chi.Router) {
-				r.Use(chiMiddleware.Timeout(30 * time.Minute))
+				r.Use(chiMiddleware.Timeout(10 * time.Minute))
 				packageHandler.RegisterRoutes(r)
 			})
 		})

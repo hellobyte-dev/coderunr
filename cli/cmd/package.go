@@ -148,7 +148,7 @@ func NewPackageSpecCommand() *cobra.Command {
 }
 
 func installLanguageVersion(baseURL, language, version string) error {
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := &http.Client{Timeout: 9 * time.Minute} // 略小于服务端HTTP路由超时
 	reqObj := map[string]string{
 		"language": language,
 		"version":  version,
@@ -256,7 +256,7 @@ Examples:
 }
 
 func listPackages(baseURL, language string, verbose bool) error {
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 3 * time.Minute} // 略大于服务端包列表获取超时
 
 	// Build URL with optional language filter
 	reqURL := baseURL + "/api/v2/packages"
@@ -286,7 +286,7 @@ func listPackages(baseURL, language string, verbose bool) error {
 }
 
 func packageAction(baseURL, action, language string, packages []string, verbose bool) error {
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := &http.Client{Timeout: 9 * time.Minute} // 略小于服务端HTTP路由超时
 	for _, pkgSpec := range packages {
 		// 支持简单的 name 或 name==version / name=version 形式
 		name := pkgSpec
